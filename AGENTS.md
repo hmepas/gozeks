@@ -346,6 +346,26 @@ egress to internet ₽1.377/GB, ingress free.
 - **MinIO for tests:** Docker Hub and quay.io refused the `minio/minio` image from this
   network, so `test/minio.sh` runs a Homebrew-installed `minio` binary instead; the compose file
   is kept for environments where the image pulls.
+- **Unicode NFC everywhere (2026-10-29, after the first live day).** Bucket keys, index keys and
+  journal paths are NFC. macOS historically produced NFD names (`й` = `и` + U+0306) and APFS treats
+  both spellings as one file, Linux treats them as two; without one canonical form the vault
+  gained 81 duplicate notes within hours. On Linux a non-NFC file is renamed on disk; if an NFC
+  twin already exists, an identical one goes to trash, a differing one becomes a conflict copy.
+  Non-NFC keys left in the bucket are deleted during reconcile once an identical NFC twin exists.
+  Dependency added: `golang.org/x/text/unicode/norm`.
+- **Case twins are not synced on a case-insensitive disk.** If a key differs only by case from a
+  file that exists locally (`Notes/attachments` vs `Notes/Attachments`), the Mac neither writes
+  nor deletes it and logs a warning; the duplicate has to be resolved by hand on a Linux node.
+  There is no canonical case to normalize to, so this stays manual.
+- **Paths under a local symlink are never read or written.** Applying a remote `put` through a
+  symlinked directory would modify the link's target, and a reconcile that skips symlinks would
+  then "delete locally" what the apply had indexed. Both sides now skip such paths (warning in
+  the log). The vault's `agent-memory-v0 -> .agent-memory-v0` link is the case that bit.
+- **Stat fast path has a modify window:** size+mtime equality is trusted only for files older
+  than 2 s, otherwise the file is rehashed (two writes inside the kernel's timestamp granularity
+  looked identical on ext4).
+- `gozeks index forget PREFIX` drops index entries so the next reconcile treats them as never
+  synced; a repair tool, used only with the daemon stopped.
 - **Not implemented** (nothing in the vault needs it): multipart upload, mobile, encryption.
 
 Review fixes (2026-10-29, after the first build):

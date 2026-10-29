@@ -35,9 +35,14 @@ func (e *Engine) Reconcile(ctx context.Context, opts ReconcileOptions) error {
 	start := time.Now()
 
 	remote := map[string]store.Object{}
+	var legacy []store.Object // keys that are not NFC
 	err := e.st.List(ctx, journal.DataPrefix, "", func(o store.Object) error {
 		rel := strings.TrimPrefix(o.Key, journal.DataPrefix)
 		if rel == "" || strings.HasSuffix(rel, "/") || e.ex.Match(rel) {
+			return nil
+		}
+		if nfc(rel) != rel {
+			legacy = append(legacy, o)
 			return nil
 		}
 		remote[rel] = o
@@ -45,6 +50,22 @@ func (e *Engine) Reconcile(ctx context.Context, opts ReconcileOptions) error {
 	})
 	if err != nil {
 		return err
+	}
+	for _, o := range legacy {
+		// A non-NFC key: if an identical NFC twin exists the old key is just a
+		// duplicate and goes away; otherwise it is left alone and reported.
+		rel := strings.TrimPrefix(o.Key, journal.DataPrefix)
+		twin, ok := remote[nfc(rel)]
+		switch {
+		case ok && twin.ETag == o.ETag && !e.DryRun:
+			if err := e.st.Delete(ctx, o.Key); err == nil {
+				e.log.Info("deleted non-NFC duplicate key", "path", nfc(rel))
+			}
+		case ok:
+			e.log.Warn("non-NFC key differs from its NFC twin; leaving both", "path", nfc(rel))
+		default:
+			e.log.Warn("non-NFC key without NFC twin; re-upload the file from a node that has it", "key", o.Key)
+		}
 	}
 	local := map[string]localInfo{}
 	err = e.walkLocal("", func(rel string, fi fs.FileInfo) error {
@@ -85,6 +106,21 @@ func (e *Engine) Reconcile(ctx context.Context, opts ReconcileOptions) error {
 	var toUpload, toDownload, toTrash []string
 	stamp := time.Now().Format("20060102-150405")
 	for _, rel := range rels {
+		if _, hasL := local[rel]; !hasL && e.caseConflict(rel) {
+			// another spelling of this name owns the file on this (case-insensitive) disk
+			e.log.Warn("path differs only by case from a local file; not synced here", "path", rel)
+			if _, hasI := indexed[rel]; hasI && !e.DryRun {
+				_ = e.idx.Delete(rel)
+			}
+			continue
+		}
+		if e.throughSymlink(rel) {
+			// never touch paths under a local symlink, in either direction
+			if _, hasI := indexed[rel]; hasI && !e.DryRun {
+				_ = e.idx.Delete(rel)
+			}
+			continue
+		}
 		L, hasL := local[rel]
 		R, hasR := remote[rel]
 		I, hasI := indexed[rel]

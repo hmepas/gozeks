@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/hmepas/gozeks/internal/index"
 	"github.com/hmepas/gozeks/internal/journal"
 )
 
@@ -449,5 +451,177 @@ func TestSequentialEditWithSkewedClockIsNotStale(t *testing.T) {
 	a.poll(t)
 	if a.read(t, "n.md") != "v2" {
 		t.Fatal("sequential edit treated as stale")
+	}
+}
+
+func TestSymlinkedDirIsIgnoredBothWays(t *testing.T) {
+	fs := newFake()
+	a := newNode(t, fs, "a")
+	b := newNode(t, fs, "b")
+	// a has a real hidden dir and a symlink pointing at it; b has a real dir of the same name
+	a.write(t, ".mem/README.md", "mac original")
+	if err := os.Symlink(".mem", filepath.Join(a.root, "mem")); err != nil {
+		t.Fatal(err)
+	}
+	a.upload(t, ".mem/README.md", "mem", "mem/README.md")
+	if fs.has("data/mem/README.md") {
+		t.Fatal("uploaded a path through a symlink")
+	}
+	b.poll(t)
+	b.write(t, "mem/README.md", "b real dir")
+	b.write(t, "mem/skills/x.md", "x")
+	b.upload(t, "mem")
+	a.poll(t) // a must not write through its symlink, nor index those paths
+	if a.read(t, ".mem/README.md") != "mac original" {
+		t.Fatal("remote put written through the symlink")
+	}
+	if _, has, _ := a.e.idx.Get("mem/README.md"); has {
+		t.Fatal("indexed a path under a symlink")
+	}
+	// reconcile on a must not delete b's files remotely
+	if err := a.e.Reconcile(context.Background(), ReconcileOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !fs.has("data/mem/README.md") || !fs.has("data/mem/skills/x.md") {
+		t.Fatal("reconcile deleted remote files that live under a local symlink")
+	}
+	// after the symlink is replaced by a real directory, the files arrive
+	os.Remove(filepath.Join(a.root, "mem"))
+	if err := a.e.Reconcile(context.Background(), ReconcileOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if a.read(t, "mem/README.md") != "b real dir" || a.read(t, "mem/skills/x.md") != "x" {
+		t.Fatalf("tree after symlink removal: %v", a.tree(t))
+	}
+}
+
+func TestDownloadedFileIsWorldReadable(t *testing.T) {
+	fs := newFake()
+	a := newNode(t, fs, "a")
+	b := newNode(t, fs, "b")
+	a.write(t, "n.md", "x")
+	a.upload(t, "n.md")
+	b.poll(t)
+	fi, err := os.Stat(filepath.Join(b.root, "n.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Fatalf("mode %o", fi.Mode().Perm())
+	}
+}
+
+func TestNFCNormalization(t *testing.T) {
+	nfd := "Notes/Батарейки.md" // й decomposed
+	nfcName := "Notes/Батарейки.md"
+	if nfc(nfd) != nfcName {
+		t.Fatal("test setup")
+	}
+	fs := newFake()
+	a := newNode(t, fs, "a")
+	b := newNode(t, fs, "b")
+	a.write(t, nfd, "v1")
+	a.upload(t, nfd) // watcher-style path in NFD
+	if !fs.has("data/"+nfcName) || fs.has("data/"+nfd) {
+		t.Fatalf("keys %v", fs.keys("data/"))
+	}
+	if _, has, _ := a.e.idx.Get(nfcName); !has {
+		t.Fatal("index key not NFC")
+	}
+	b.poll(t)
+	if b.read(t, nfcName) != "v1" {
+		t.Fatal("b did not get the file under its NFC name")
+	}
+	// legacy state: an NFD key in the bucket next to its identical NFC twin
+	_, _ = fs.Put(context.Background(), "data/"+nfd, []byte("v1"), nil)
+	if err := b.e.Reconcile(context.Background(), ReconcileOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if fs.has("data/" + nfd) {
+		t.Fatal("legacy NFD key not removed")
+	}
+	if runtime.GOOS == "darwin" {
+		return // APFS maps both spellings to one file; the twin cases below need Linux
+	}
+	// on Linux an NFD duplicate file on disk is a distinct file
+	b.write(t, nfd, "v1")
+	if err := b.e.Reconcile(context.Background(), ReconcileOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	tb := b.tree(t)
+	if len(tb) != 1 || tb[nfcName] != "v1" {
+		t.Fatalf("b tree %v", tb)
+	}
+	if tr := b.trashed(t); len(tr) != 1 {
+		t.Fatalf("duplicate should be trashed, got %v", tr)
+	}
+	// a differing NFD twin becomes a conflict copy instead
+	b.write(t, nfd, "other")
+	if err := b.e.Reconcile(context.Background(), ReconcileOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	tb = b.tree(t)
+	n := 0
+	for p, v := range tb {
+		if strings.Contains(p, "(conflict b") && v == "other" {
+			n++
+		}
+	}
+	if n != 1 || tb[nfcName] != "v1" {
+		t.Fatalf("b tree %v", tb)
+	}
+}
+
+func TestIndexMigratesToNFC(t *testing.T) {
+	fs := newFake()
+	a := newNode(t, fs, "a")
+	nfd := "Ба" + "и\u0306" + ".md" // й decomposed
+	_ = a.e.idx.Put(nfd, index.Entry{Hash: "sha256:x"})
+	a.e.Close()
+	e2, err := New(a.cfg, fs, a.e.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e2.Close()
+	if _, has, _ := e2.idx.Get(nfd); has {
+		t.Fatal("NFD key kept")
+	}
+	if _, has, _ := e2.idx.Get(nfc(nfd)); !has {
+		t.Fatal("NFC key missing")
+	}
+}
+
+func TestCaseTwinIsNotTouchedOnCaseInsensitiveFS(t *testing.T) {
+	fs := newFake()
+	a := newNode(t, fs, "a")
+	b := newNode(t, fs, "b")
+	a.write(t, "Notes/Attachments/x.jpg", "mac")
+	if _, err := os.Lstat(filepath.Join(a.root, "Notes/attachments/x.jpg")); err != nil {
+		t.Skip("case-sensitive filesystem")
+	}
+	a.upload(t, "Notes/Attachments/x.jpg")
+	b.poll(t)
+	b.write(t, "Notes/attachments/x.jpg", "linux twin") // on a Linux node this is a second file
+	// simulate the Linux node's upload (its tree is case-sensitive; fake it via the store)
+	_, _ = fs.Put(context.Background(), "data/Notes/attachments/x.jpg", []byte("linux twin"), map[string]string{"hash": hashBytes([]byte("linux twin"))})
+	ent := journal.Entry{Node: "b", Ts: time.Now().UnixMilli(), Seq: 5, Ops: []journal.Op{{Op: "put", Path: "Notes/attachments/x.jpg", Hash: hashBytes([]byte("linux twin"))}}}
+	body, _ := json.Marshal(ent)
+	_, _ = fs.Put(context.Background(), journal.Key(ent.Ts, "b", 5), body, nil)
+	_, _ = fs.Put(context.Background(), journal.CursorKey, []byte("x"), nil)
+	a.poll(t)
+	if a.read(t, "Notes/Attachments/x.jpg") != "mac" {
+		t.Fatal("case twin overwrote the local file")
+	}
+	if _, has, _ := a.e.idx.Get("Notes/attachments/x.jpg"); has {
+		t.Fatal("case twin indexed")
+	}
+	if err := a.e.Reconcile(context.Background(), ReconcileOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !fs.has("data/Notes/attachments/x.jpg") || !fs.has("data/Notes/Attachments/x.jpg") {
+		t.Fatal("reconcile deleted a case twin remotely")
+	}
+	if a.read(t, "Notes/Attachments/x.jpg") != "mac" {
+		t.Fatal("reconcile overwrote the local file with its case twin")
 	}
 }

@@ -18,6 +18,7 @@ import (
 
 	"github.com/hmepas/gozeks/internal/config"
 	"github.com/hmepas/gozeks/internal/engine"
+	"github.com/hmepas/gozeks/internal/index"
 	"github.com/hmepas/gozeks/internal/journal"
 	"github.com/hmepas/gozeks/internal/store"
 )
@@ -32,6 +33,8 @@ commands:
   status                 index stats, cursor, request counters, relay role
   trash list             files removed by remote deletes
   trash restore ID/PATH  move a trashed file back into the folder
+  index forget PREFIX    drop index entries under PREFIX (daemon must be stopped);
+                         the next reconcile treats them as never synced
 `
 
 func main() {
@@ -59,6 +62,8 @@ func main() {
 		err = cmdStatus(cfg)
 	case "trash":
 		err = cmdTrash(cfg, args)
+	case "index":
+		err = cmdIndex(cfg, args)
 	case "run", "push", "pull", "reconcile":
 		err = withEngine(cfg, log, func(ctx context.Context, e *engine.Engine, st *store.Store) error {
 			switch cmd {
@@ -248,4 +253,30 @@ func cmdTrash(cfg *config.Config, args []string) error {
 	default:
 		return errors.New("usage: gozeks trash list | restore ID/PATH")
 	}
+}
+
+func cmdIndex(cfg *config.Config, args []string) error {
+	if len(args) != 2 || args[0] != "forget" || args[1] == "" {
+		return errors.New("usage: gozeks index forget PREFIX")
+	}
+	db, err := index.Open(filepath.Join(cfg.StateDir, "index.db"))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	prefix := strings.TrimSuffix(args[1], "/")
+	paths, err := db.Under(prefix)
+	if err != nil {
+		return err
+	}
+	if _, has, _ := db.Get(prefix); has {
+		paths = append(paths, prefix)
+	}
+	for _, p := range paths {
+		if err := db.Delete(p); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("forgot %d index entries under %s\n", len(paths), prefix)
+	return nil
 }

@@ -141,7 +141,21 @@ func (e *Engine) expand(rels []string) (files, deletes []string, err error) {
 		if rel == "" {
 			continue
 		}
-		excluded := e.ex.Match(rel)
+		if n := nfc(rel); n != rel {
+			// watcher reported a non-NFC name: normalize it on disk first
+			if fi, err := os.Lstat(e.abs(rel)); err == nil && fi.Mode().IsRegular() {
+				if m, err := e.normalizeName(rel); err == nil && m != "" {
+					addFile(m)
+				}
+			}
+			// whatever happened on disk, the NFC path is what we track
+			rel = n
+		}
+		if e.caseConflict(rel) {
+			e.log.Warn("skipping path that differs only by case from a local file", "path", rel)
+			continue
+		}
+		excluded := e.ex.Match(rel) || e.throughSymlink(rel)
 		fi, statErr := os.Lstat(e.abs(rel))
 		switch {
 		case statErr != nil || excluded:
@@ -187,10 +201,10 @@ func (e *Engine) uploadOne(ctx context.Context, rel string) uploadResult {
 		return res
 	}
 	fi, err := os.Lstat(e.abs(rel))
-	if err != nil || !fi.Mode().IsRegular() {
+	if err != nil || !fi.Mode().IsRegular() || e.throughSymlink(rel) {
 		return res // vanished between expand and now; reconcile will sort it out
 	}
-	if has && cur.Size == fi.Size() && cur.Mtime == fi.ModTime().UnixNano() {
+	if has && cur.Size == fi.Size() && cur.Mtime == fi.ModTime().UnixNano() && !recent(fi.ModTime()) {
 		return res // unchanged by stat
 	}
 	data, err := os.ReadFile(e.abs(rel))

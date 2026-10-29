@@ -24,6 +24,7 @@ import (
 	"github.com/hmepas/gozeks/internal/exclude"
 	"github.com/hmepas/gozeks/internal/index"
 	"github.com/hmepas/gozeks/internal/store"
+	"golang.org/x/text/unicode/norm"
 )
 
 // Storage is the subset of the S3 store the engine uses (fakeable in tests).
@@ -92,7 +93,95 @@ func New(cfg *config.Config, st Storage, log *slog.Logger) (*Engine, error) {
 	etag, _ := idx.GetMeta(metaCursorETag)
 	e.cursorETag.Store(etag)
 	e.relay.role.Store("none")
+	if err := e.normalizeIndex(); err != nil {
+		idx.Close()
+		return nil, err
+	}
 	return e, nil
+}
+
+// nfc returns the path in Unicode NFC. All keys (bucket, index, journal) are
+// NFC: macOS historically produced NFD names, Linux keeps whatever bytes it is
+// given, and without one canonical form the same note becomes two files.
+func nfc(rel string) string { return norm.NFC.String(rel) }
+
+// normalizeIndex re-keys index entries written before NFC normalization.
+func (e *Engine) normalizeIndex() error {
+	type kv struct {
+		k string
+		v index.Entry
+	}
+	var bad []kv
+	err := e.idx.All(func(p string, ent index.Entry) error {
+		if !norm.NFC.IsNormalString(p) {
+			bad = append(bad, kv{p, ent})
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, b := range bad {
+		if _, has, _ := e.idx.Get(nfc(b.k)); !has {
+			if err := e.idx.Put(nfc(b.k), b.v); err != nil {
+				return err
+			}
+		}
+		if err := e.idx.Delete(b.k); err != nil {
+			return err
+		}
+	}
+	if len(bad) > 0 {
+		e.log.Info("index normalized to NFC", "entries", len(bad))
+	}
+	return nil
+}
+
+// normalizeName makes sure the on-disk name of rel is NFC. On a
+// normalization-insensitive filesystem (APFS) nothing changes. On Linux an
+// NFD-named file is renamed; if an NFC twin already exists, an identical
+// duplicate goes to trash and a differing one becomes a conflict copy.
+// It returns the NFC path to use, or "" if the file should be skipped.
+func (e *Engine) normalizeName(rel string) (string, error) {
+	n := nfc(rel)
+	if n == rel {
+		return rel, nil
+	}
+	src, dst := e.abs(rel), e.abs(n)
+	dfi, err := os.Lstat(dst)
+	if errors.Is(err, fs.ErrNotExist) {
+		if err := os.Rename(src, dst); err != nil {
+			return "", err
+		}
+		e.log.Info("renamed to NFC", "path", n)
+		return n, nil
+	}
+	sfi, err := os.Lstat(src)
+	if err != nil || !sfi.Mode().IsRegular() {
+		return "", nil
+	}
+	if dfi != nil && os.SameFile(sfi, dfi) {
+		return n, nil // normalization-insensitive filesystem (APFS): same file
+	}
+	// a distinct NFC twin exists (Linux): compare content
+	hs, err1 := hashFile(src)
+	hd, err2 := hashFile(dst)
+	if err1 != nil || err2 != nil {
+		return "", nil
+	}
+	if hs == hd {
+		if err := e.trash(rel, time.Now().Format("20060102-150405")); err != nil {
+			return "", err
+		}
+		e.log.Info("trashed NFD duplicate", "path", n)
+		return "", nil
+	}
+	c := conflictName(n, e.cfg.Node, time.Now())
+	if err := os.Rename(src, e.abs(c)); err != nil {
+		return "", err
+	}
+	e.log.Warn("NFD twin differs, kept as conflict copy", "path", n, "kept_as", c)
+	return c, nil
 }
 
 // Close releases the index.
@@ -112,9 +201,61 @@ type localFile struct {
 	hash  string
 }
 
-// localState stats rel and returns nil if it is absent or not a regular file.
+// throughSymlink reports whether any directory component of rel is a
+// symlink. Such paths are never read or written: the same name would mean a
+// different file on every node, and writing there would modify the link's
+// target.
+func (e *Engine) throughSymlink(rel string) bool {
+	parts := strings.Split(rel, "/")
+	p := e.cfg.Root
+	for _, c := range parts[:len(parts)-1] {
+		p = filepath.Join(p, c)
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return false // absent: nothing to traverse
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// caseConflict reports whether rel resolves to a file on disk whose on-disk
+// spelling differs from rel (case-insensitive filesystem, e.g. APFS). Such a
+// path belongs to another key and must not be read, written or deleted.
+func (e *Engine) caseConflict(rel string) bool {
+	if _, err := os.Lstat(e.abs(rel)); err != nil {
+		return false
+	}
+	dir := e.cfg.Root
+	for _, c := range strings.Split(rel, "/") {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return false
+		}
+		found := false
+		for _, d := range entries {
+			if d.Name() == c {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return true
+		}
+		dir = filepath.Join(dir, c)
+	}
+	return false
+}
+
+// localState stats rel and returns nil if it is absent, not a regular file,
+// or reached through a symlinked directory.
 // When size and mtime match the index entry the stored hash is reused.
 func (e *Engine) localState(rel string, idx *index.Entry) (*localFile, error) {
+	if e.throughSymlink(rel) {
+		return nil, nil
+	}
 	fi, err := os.Lstat(e.abs(rel))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -126,7 +267,7 @@ func (e *Engine) localState(rel string, idx *index.Entry) (*localFile, error) {
 		return nil, nil
 	}
 	lf := &localFile{size: fi.Size(), mtime: fi.ModTime().UnixNano()}
-	if idx != nil && idx.Size == lf.size && idx.Mtime == lf.mtime && idx.Hash != "" {
+	if idx != nil && idx.Size == lf.size && idx.Mtime == lf.mtime && idx.Hash != "" && !recent(fi.ModTime()) {
 		lf.hash = idx.Hash
 		return lf, nil
 	}
@@ -140,6 +281,11 @@ func (e *Engine) localState(rel string, idx *index.Entry) (*localFile, error) {
 	lf.hash = h
 	return lf, nil
 }
+
+// recent reports whether a modification time is too fresh for the size+mtime
+// fast path: two writes inside the filesystem's timestamp granularity would
+// otherwise look identical (rsync's "modify window").
+func recent(mtime time.Time) bool { return time.Since(mtime) < 2*time.Second }
 
 func hashFile(path string) (string, error) {
 	f, err := os.Open(path)
@@ -203,6 +349,16 @@ func (e *Engine) walkLocal(dir string, fn func(rel string, fi fs.FileInfo) error
 			return nil
 		}
 		if d.IsDir() {
+			if n := nfc(rel); n != rel {
+				if _, err := os.Lstat(e.abs(n)); errors.Is(err, fs.ErrNotExist) {
+					if err := os.Rename(p, e.abs(n)); err == nil {
+						e.log.Info("renamed directory to NFC", "path", n)
+						return filepath.SkipDir // re-walked on the next pass
+					}
+				}
+				e.log.Warn("directory name is not NFC and an NFC twin exists; skipping", "path", rel)
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if d.Type()&fs.ModeSymlink != 0 {
@@ -212,11 +368,19 @@ func (e *Engine) walkLocal(dir string, fn func(rel string, fi fs.FileInfo) error
 		if !d.Type().IsRegular() {
 			return nil
 		}
-		fi, err := d.Info()
+		n, err := e.normalizeName(rel)
+		if err != nil {
+			e.log.Warn("normalize name", "path", rel, "err", err)
+			return nil
+		}
+		if n == "" {
+			return nil
+		}
+		fi, err := os.Lstat(e.abs(n))
 		if err != nil {
 			return nil
 		}
-		return fn(rel, fi)
+		return fn(n, fi)
 	})
 }
 

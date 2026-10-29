@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -117,7 +118,16 @@ func (e *Engine) applyEntry(ctx context.Context, key string, entry *journal.Entr
 	var pending []string
 	applied := 0
 	for _, op := range entry.Ops {
+		op.Path = nfc(op.Path)
 		if e.ex.Match(op.Path) {
+			continue
+		}
+		if e.throughSymlink(op.Path) {
+			e.log.Warn("skipping path under a local symlink", "path", op.Path)
+			continue
+		}
+		if e.caseConflict(op.Path) {
+			e.log.Warn("skipping path that differs only by case from a local file", "path", op.Path)
 			continue
 		}
 		var p []string
@@ -243,6 +253,14 @@ func (e *Engine) pull(ctx context.Context, rel, key string, idx *index.Entry, lo
 		t := time.Unix(mtime, 0)
 		_ = os.Chtimes(tmpName, t, t)
 	}
+	// CreateTemp makes the file 0600; keep the existing mode or use 0644.
+	mode := fs.FileMode(0o644)
+	if loc != nil {
+		if fi, err := os.Stat(abs); err == nil {
+			mode = fi.Mode().Perm()
+		}
+	}
+	_ = os.Chmod(tmpName, mode)
 	if err := os.Rename(tmpName, abs); err != nil {
 		return nil, err
 	}

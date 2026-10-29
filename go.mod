@@ -25,4 +25,5 @@ require (
 	github.com/rjeczalik/notify v0.9.3 // indirect
 	go.etcd.io/bbolt v1.5.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 )

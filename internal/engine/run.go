@@ -94,7 +94,7 @@ func (e *Engine) Run(ctx context.Context, opts RunOptions) error {
 			case <-ctx.Done():
 				return
 			case rel := <-events:
-				if rel == "" || e.ex.Match(rel) {
+				if rel == "" || e.ex.Match(nfc(rel)) {
 					continue
 				}
 				b.Add(rel)
