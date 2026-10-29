@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd user agent for gozeks.
+  Install:
+    sed "s|HOME|$HOME|g" deploy/com.hmepas.gozeks.plist > ~/Library/LaunchAgents/com.hmepas.gozeks.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hmepas.gozeks.plist
+  Secrets are read from ~/.config/gozeks/env (mode 0600).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hmepas.gozeks</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>set -a; . "$HOME/.config/gozeks/env"; set +a; exec "$HOME/bin/gozeks" run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>HOME</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>HOME/Library/Logs/gozeks.log</string>
+  <key>StandardErrorPath</key>
+  <string>HOME/Library/Logs/gozeks.log</string>
+</dict>
+</plist>

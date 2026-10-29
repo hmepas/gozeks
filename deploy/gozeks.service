@@ -1,0 +1,24 @@
+# systemd unit for gozeks (system scope). Install:
+#   sudo install -m 755 gozeks /usr/local/bin/gozeks
+#   sudo install -m 644 deploy/gozeks.service /etc/systemd/system/gozeks.service   # edit User/paths
+#   sudo install -m 600 deploy/env.example /etc/gozeks.env                           # fill in keys
+#   sudo systemctl enable --now gozeks
+# For a user unit, drop User= and use `systemctl --user` with the env file under ~/.config/gozeks/env.
+[Unit]
+Description=gozeks folder <-> S3 sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=agent
+EnvironmentFile=/etc/gozeks.env
+ExecStart=/usr/local/bin/gozeks -config /home/agent/.config/gozeks/config.toml run
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+# inotify needs one watch per directory
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

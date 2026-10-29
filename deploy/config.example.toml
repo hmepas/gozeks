@@ -1,0 +1,40 @@
+# gozeks configuration. Copy to ~/.config/gozeks/config.toml and edit.
+# Secrets are never put here: GOZEKS_S3_ACCESS_KEY, GOZEKS_S3_SECRET_KEY and
+# GOZEKS_RELAY_TOKEN come from the environment (see deploy/env.example).
+
+node = "mac"                        # unique per node; used in journal keys and conflict names
+root = "~/zk"                       # the folder to sync
+state_dir = "~/.local/state/gozeks/zk"
+
+[s3]
+endpoint = "https://s3.ru-3.storage.selcloud.ru"
+region = "ru-3"
+bucket = "obs"
+path_style = false                  # true for MinIO and most self-hosted endpoints
+
+[sync]
+poll = "5s"                         # marker HEAD interval when not connected to a relay
+idle_poll = "5s"                    # interval after `idle_after` without changes (optional)
+idle_after = "10m"
+debounce = "2s"                     # quiet time per file before uploading
+max_batch_wait = "5s"               # a constantly changing file is uploaded at least this often
+reconcile = "10m"                   # full bucket/local comparison interval
+fallback_poll = "60s"               # marker HEAD interval while connected to a relay
+exclude = [
+  ".obsidian/workspace*.json",
+  ".obsidian/workspace",
+  ".obsidian/cache/",
+  ".trash/",
+  ".zk/",
+  ".DS_Store",
+  "*.tmp",
+  "*~",
+  ".#*",
+  ".gozeks-*",
+]
+
+[relay]
+# Set listen/advertise only on always-on servers that may act as the relay.
+# listen = "0.0.0.0:8711"
+# advertise = "https://1.2.3.4:8711"
+lease = "10m"

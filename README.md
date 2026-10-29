@@ -1,0 +1,111 @@
+# gozeks
+
+Two-way sync of a local folder with any S3-compatible bucket, fast enough for a shared
+Obsidian vault edited by a human on a Mac and by agents on several servers at the same time.
+Changes typically propagate between nodes in 5–8 seconds. One static Go binary per node,
+no server in the middle, no provider-specific services.
+
+## How it works
+
+Every node runs the `gozeks` daemon:
+
+- **Local → bucket.** The daemon watches the folder with filesystem events, waits ~2 s for the
+  editor to finish writing, uploads the changed files to `data/…`, appends a small journal
+  entry listing what changed, and touches a marker object `_sync/cursor`.
+- **Relay.** One of your always-on servers is elected (through a lock file in the same
+  bucket) as a relay. A node that uploaded a batch tells the relay, which pushes the
+  journal key to every other node over an open HTTPS stream. Propagation is sub-second. The
+  relay carries no file data and keeps no state; if it goes away, another server takes
+  over and in the meantime every node falls back to polling.
+- **Bucket → local.** The relay (or, as a fallback, every node) does one cheap HEAD on
+  the marker every few seconds. When its ETag changes, new journal entries are fetched, own
+  ones skipped, and the files they mention are downloaded or removed. Downloads are written
+  atomically (temp file + rename), so Obsidian never sees a half-written note.
+- **Safety nets.** A full reconcile (one bucket listing compared with the local index) runs
+  at startup and every 10 minutes and repairs anything missed. Remote deletes go to a local
+  trash folder, never straight to `rm`. Turn on bucket versioning for a second layer of undo.
+- **Conflicts.** If you edited a file locally and a newer version arrives from another node,
+  the incoming version takes the file's path and your copy is kept next to it as
+  `Name (conflict <node> <date>).md`, the same behaviour Yandex.Disk users know.
+
+Idle cost is one HEAD request every 5 seconds for the whole fleet (the relay polls on
+everyone's behalf) plus a slow fallback poll per node. Everything else is paid only when
+something actually changes.
+
+## Requirements
+
+- An S3-compatible bucket (tested with Selectel; MinIO used in tests) and an access key pair
+  with read/write rights on that bucket.
+- macOS or Linux. Go 1.26 to build.
+
+## Quick start
+
+```sh
+make build            # macOS: needs cgo for FSEvents (Xcode command line tools)
+make build-linux      # static linux/amd64 binary in dist/
+
+mkdir -p ~/.config/gozeks
+cp deploy/config.example.toml ~/.config/gozeks/config.toml   # edit node name, root, endpoint, bucket
+export GOZEKS_S3_ACCESS_KEY=...
+export GOZEKS_S3_SECRET_KEY=...
+
+# first node: seed the empty bucket from your folder
+gozeks push
+
+# every other node: fetch the folder from the bucket
+gozeks pull
+
+# then keep it in sync
+gozeks run
+```
+
+Service units for launchd (macOS) and systemd (Linux) are in `deploy/`.
+
+## Commands
+
+| command | what it does |
+|---|---|
+| `gozeks run` | daemon: watch, poll, reconcile |
+| `gozeks push` | one-shot upload of the folder into an empty bucket |
+| `gozeks pull` | one-shot download of the bucket into an empty folder |
+| `gozeks reconcile` | one full consistency pass |
+| `gozeks status` | index size, last cursor, request counters (for cost tracking) |
+| `gozeks trash list / restore` | files removed by remote deletes |
+
+## Configuration
+
+See `deploy/config.example.toml`. The important knobs:
+
+- `node` — unique name per machine; appears in journal keys and conflict file names.
+- `sync.poll` — marker polling interval; 5 s by default. Longer = cheaper and slower.
+- `sync.fallback_poll` — how often a node polls on its own while connected to a relay (60 s).
+- `relay.listen` / `relay.advertise` — set on servers that may act as relay. The
+  shared `GOZEKS_RELAY_TOKEN` env var authenticates nodes; TLS uses a self-signed cert whose
+  fingerprint is published through the bucket, so no certificates to manage.
+- `sync.exclude` — glob patterns never synced. Defaults cover Obsidian's `workspace*.json`,
+  caches, `.trash/`, `.zk/`, `.DS_Store` and editor temp files. Everything else, including
+  `.obsidian/` settings and plugins, is synced.
+
+Credentials are read from `GOZEKS_S3_ACCESS_KEY` / `GOZEKS_S3_SECRET_KEY` (or the standard
+`AWS_*` variables) and are never written to the config or logs.
+
+## Migrating from a cloud-drive folder
+
+1. Create the bucket (private, versioning on), create an access key.
+2. Stop the old sync client on every node. Copy the folder out of the cloud drive's directory.
+3. On one node: `gozeks push`. On the others: `gozeks pull`.
+4. Point Obsidian at the new folder location, start `gozeks run` everywhere.
+
+## Cost
+
+On Selectel's 2026 prices a Mac plus two servers comes to roughly ₽55/month: the relay's
+polling, lease renewals, a few hundred uploads a day and a 1 GB vault with versions.
+`gozeks status` shows live request counters so you can check.
+
+## Development
+
+Design decisions, the bucket layout and the acceptance tests live in `AGENTS.md`.
+
+    make test          # unit tests
+    ./test/minio.sh    # or docker-compose -f test/docker-compose.yml up -d
+    make integration   # multi-daemon scenarios against MinIO (see test/README.md)

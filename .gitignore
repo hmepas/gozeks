@@ -1,0 +1,30 @@
+# binaries
+/gozeks
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Go tooling
+/vendor/
+coverage.*
+*.prof
+
+# local config / secrets
+*.env
+.env*
+config.toml
+!deploy/config.example.toml
+
+# state and test scratch
+/.state/
+/test/data/
+/test/minio-data/
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

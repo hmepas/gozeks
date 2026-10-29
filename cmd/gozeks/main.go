@@ -1,0 +1,251 @@
+// Command gozeks syncs a local folder with an S3 bucket.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/hmepas/gozeks/internal/config"
+	"github.com/hmepas/gozeks/internal/engine"
+	"github.com/hmepas/gozeks/internal/journal"
+	"github.com/hmepas/gozeks/internal/store"
+)
+
+const usage = `usage: gozeks [-config FILE] [-v] COMMAND
+
+commands:
+  run                    daemon: watch + poll + reconcile
+  push [--dry-run] [--force]   upload local folder into an (empty) bucket
+  pull [--dry-run] [--force]   download bucket into an (empty) local folder
+  reconcile [--dry-run]  one full reconcile pass
+  status                 index stats, cursor, request counters, relay role
+  trash list             files removed by remote deletes
+  trash restore ID/PATH  move a trashed file back into the folder
+`
+
+func main() {
+	cfgPath := flag.String("config", config.DefaultPath(), "config file")
+	verbose := flag.Bool("v", false, "debug logging")
+	flag.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	flag.Parse()
+	if flag.NArg() < 1 {
+		flag.Usage()
+		os.Exit(2)
+	}
+	lvl := slog.LevelInfo
+	if *verbose {
+		lvl = slog.LevelDebug
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fatal(err)
+	}
+	cmd, args := flag.Arg(0), flag.Args()[1:]
+	switch cmd {
+	case "status":
+		err = cmdStatus(cfg)
+	case "trash":
+		err = cmdTrash(cfg, args)
+	case "run", "push", "pull", "reconcile":
+		err = withEngine(cfg, log, func(ctx context.Context, e *engine.Engine, st *store.Store) error {
+			switch cmd {
+			case "run":
+				return e.Run(ctx, engine.RunOptions{Counters: &st.Counters})
+			case "push":
+				return cmdPush(ctx, cfg, e, st, args)
+			case "pull":
+				return cmdPull(ctx, cfg, e, st, args)
+			default:
+				fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+				dry := fs.Bool("dry-run", false, "only report")
+				_ = fs.Parse(args)
+				e.DryRun = *dry
+				return e.Reconcile(ctx, engine.ReconcileOptions{})
+			}
+		})
+	default:
+		flag.Usage()
+		os.Exit(2)
+	}
+	if err != nil {
+		fatal(err)
+	}
+}
+
+func fatal(err error) {
+	fmt.Fprintln(os.Stderr, "gozeks:", err)
+	os.Exit(1)
+}
+
+func withEngine(cfg *config.Config, log *slog.Logger, fn func(context.Context, *engine.Engine, *store.Store) error) error {
+	st, err := store.New(cfg.S3)
+	if err != nil {
+		return err
+	}
+	e, err := engine.New(cfg, st, log)
+	if err != nil {
+		return err
+	}
+	defer e.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	err = fn(ctx, e, st)
+	c := st.Counters.Snapshot()
+	log.Info("requests", "put", c.Put, "get", c.Get, "delete", c.Delete, "bytes_up", c.BytesUp, "bytes_down", c.BytesDown)
+	return err
+}
+
+func seedFlags(name string, args []string) (dry, force bool) {
+	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	d := fs.Bool("dry-run", false, "only report")
+	f := fs.Bool("force", false, "allow a non-empty target")
+	_ = fs.Parse(args)
+	return *d, *f
+}
+
+func cmdPush(ctx context.Context, cfg *config.Config, e *engine.Engine, st *store.Store, args []string) error {
+	dry, force := seedFlags("push", args)
+	if !force {
+		empty := true
+		err := st.List(ctx, journal.DataPrefix, "", func(store.Object) error { empty = false; return errStop })
+		if err != nil && !errors.Is(err, errStop) {
+			return err
+		}
+		if !empty {
+			return errors.New("bucket already has data/; use --force to push anyway (or pull first)")
+		}
+	}
+	e.DryRun = dry
+	return e.Reconcile(ctx, engine.ReconcileOptions{})
+}
+
+var errStop = errors.New("stop")
+
+func cmdPull(ctx context.Context, cfg *config.Config, e *engine.Engine, st *store.Store, args []string) error {
+	dry, force := seedFlags("pull", args)
+	if err := os.MkdirAll(cfg.Root, 0o755); err != nil {
+		return err
+	}
+	if !force {
+		entries, err := os.ReadDir(cfg.Root)
+		if err != nil {
+			return err
+		}
+		if len(entries) > 0 {
+			return fmt.Errorf("%s is not empty; use --force to pull anyway", cfg.Root)
+		}
+	}
+	e.DryRun = dry
+	return e.Reconcile(ctx, engine.ReconcileOptions{AllowEmptyLocal: true})
+}
+
+func cmdStatus(cfg *config.Config) error {
+	s, err := engine.ReadStatus(cfg.StateDir)
+	if err != nil {
+		return fmt.Errorf("no status file in %s (daemon never ran?): %w", cfg.StateDir, err)
+	}
+	age := time.Since(s.UpdatedAt).Round(time.Second)
+	alive := "running"
+	if age > 30*time.Second {
+		alive = "stale, daemon probably stopped"
+	}
+	fmt.Printf("node:            %s (%s, status age %s)\n", s.Node, alive, age)
+	fmt.Printf("root:            %s\n", cfg.Root)
+	fmt.Printf("index:           %d files\n", s.IndexCount)
+	fmt.Printf("pending batch:   %d paths\n", s.Pending)
+	fmt.Printf("cursor etag:     %s\n", s.CursorETag)
+	if s.LastJournalTs > 0 {
+		fmt.Printf("last journal:    %s\n", time.UnixMilli(s.LastJournalTs).Format(time.RFC3339))
+	}
+	fmt.Printf("last change:     %s\n", s.LastChange.Format(time.RFC3339))
+	fmt.Printf("relay role:      %s", s.Role)
+	if s.RelayConnected {
+		fmt.Printf(", connected to %s", s.RelayURL)
+	}
+	if s.Role == "leader" {
+		fmt.Printf(", %d subscribers", s.Subscribers)
+	}
+	fmt.Println()
+	c := s.Counters
+	fmt.Printf("requests since %s:\n", s.CountersSince.Format("2006-01-02 15:04"))
+	fmt.Printf("  PUT/POST:      %d\n  GET/HEAD/LIST: %d\n  DELETE:        %d\n  bytes up:      %s\n  bytes down:    %s\n",
+		c.Put, c.Get, c.Delete, human(c.BytesUp), human(c.BytesDown))
+	return nil
+}
+
+func human(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+func cmdTrash(cfg *config.Config, args []string) error {
+	trashDir := filepath.Join(cfg.StateDir, "trash")
+	if len(args) < 1 {
+		return errors.New("usage: gozeks trash list | restore ID/PATH")
+	}
+	switch args[0] {
+	case "list":
+		var items []string
+		err := filepath.WalkDir(trashDir, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			rel, _ := filepath.Rel(trashDir, p)
+			items = append(items, filepath.ToSlash(rel))
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		sort.Strings(items)
+		for _, it := range items {
+			fmt.Println(it)
+		}
+		return nil
+	case "restore":
+		if len(args) != 2 {
+			return errors.New("usage: gozeks trash restore ID/PATH (as printed by trash list)")
+		}
+		item := filepath.FromSlash(args[1])
+		src := filepath.Join(trashDir, item)
+		parts := strings.SplitN(args[1], "/", 2)
+		if len(parts) != 2 {
+			return errors.New("expected ID/PATH")
+		}
+		dst := filepath.Join(cfg.Root, filepath.FromSlash(parts[1]))
+		if _, err := os.Stat(dst); err == nil {
+			return fmt.Errorf("%s already exists", dst)
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		if err := os.Rename(src, dst); err != nil {
+			return err
+		}
+		fmt.Println("restored", dst)
+		return nil
+	default:
+		return errors.New("usage: gozeks trash list | restore ID/PATH")
+	}
+}
