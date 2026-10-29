@@ -236,7 +236,7 @@ func (e *Engine) caseConflict(rel string) bool {
 		}
 		found := false
 		for _, d := range entries {
-			if d.Name() == c {
+			if nfc(d.Name()) == c { // on-disk spelling may be NFD
 				found = true
 				break
 			}

@@ -625,3 +625,23 @@ func TestCaseTwinIsNotTouchedOnCaseInsensitiveFS(t *testing.T) {
 		t.Fatal("reconcile overwrote the local file with its case twin")
 	}
 }
+
+func TestNFDOnDiskNameIsNotACaseConflict(t *testing.T) {
+	fs := newFake()
+	a := newNode(t, fs, "a")
+	nfd := "Notes/Эльгуна и ка" + "й" + "т.md" // й decomposed, as APFS stores it
+	a.write(t, nfd, "v1")
+	if a.e.caseConflict(nfc(nfd)) {
+		t.Fatal("NFD spelling on disk reported as case conflict")
+	}
+	a.upload(t, nfd)
+	if !fs.has("data/" + nfc(nfd)) {
+		t.Fatalf("not uploaded: %v", fs.keys("data/"))
+	}
+	a.write(t, nfd, "v2")
+	a.upload(t, nfc(nfd)) // reconcile-style NFC path
+	body, _, _, _ := fs.Get(context.Background(), "data/"+nfc(nfd))
+	if string(body) != "v2" {
+		t.Fatal("edit of NFD-named file not uploaded under NFC key")
+	}
+}
