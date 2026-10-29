@@ -15,7 +15,7 @@
   <array>
     <string>/bin/sh</string>
     <string>-c</string>
-    <string>set -a; . "$HOME/.config/gozeks/env"; set +a; exec "$HOME/bin/gozeks" run</string>
+    <string>set -a; . "HOME/.config/gozeks/env"; set +a; exec "HOME/bin/gozeks" run</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

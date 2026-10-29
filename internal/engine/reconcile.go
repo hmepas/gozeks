@@ -173,7 +173,7 @@ func (e *Engine) downloadMany(ctx context.Context, rels []string) []string {
 		go func() {
 			defer wg.Done()
 			for rel := range jobs {
-				p, err := e.applyPut(ctx, rel, "", "", "", 0)
+				p, err := e.applyPut(ctx, rel, "", "", "", "", 0)
 				if err != nil {
 					e.log.Error("download", "path", rel, "err", err)
 					continue

@@ -62,9 +62,10 @@ type Engine struct {
 	DryRun bool
 
 	mu         sync.Mutex // serializes every mutation of the tree and the index
+	pollMu     sync.Mutex // single-flights CheckCursor (poll loop, relay connect, relay drop)
 	seq        atomic.Int64
 	lastChange atomic.Int64 // unix nanos of the last local or remote change seen
-	cursorETag string
+	cursorETag atomic.Value // string: ETag of _sync/cursor as of the last processed journal
 
 	// OnKeys is called after every committed batch with its journal keys.
 	OnKeys func(keys []string)
@@ -88,7 +89,8 @@ func New(cfg *config.Config, st Storage, log *slog.Logger) (*Engine, error) {
 		return nil, err
 	}
 	e := &Engine{cfg: cfg, log: log, st: st, idx: idx, ex: ex}
-	e.cursorETag, _ = idx.GetMeta(metaCursorETag)
+	etag, _ := idx.GetMeta(metaCursorETag)
+	e.cursorETag.Store(etag)
 	e.relay.role.Store("none")
 	return e, nil
 }

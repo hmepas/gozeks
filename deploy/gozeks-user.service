@@ -1,0 +1,21 @@
+# systemd *user* unit (no root needed). Install:
+#   mkdir -p ~/.config/systemd/user && cp deploy/gozeks-user.service ~/.config/systemd/user/gozeks.service
+#   loginctl enable-linger $USER          # start at boot without a login session
+#   systemctl --user daemon-reload && systemctl --user enable --now gozeks
+#   journalctl --user -u gozeks -f
+# Secrets in ~/.config/gozeks/env (chmod 600), binary in ~/bin/gozeks.
+[Unit]
+Description=gozeks folder <-> S3 sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/gozeks/env
+ExecStart=%h/bin/gozeks run
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

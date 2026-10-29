@@ -41,7 +41,7 @@ func (e *Engine) status(counters *store.Counters) Status {
 		RelayConnected: e.relay.connected.Load(),
 		RelayURL:       e.relay.url(),
 		IndexCount:     n,
-		CursorETag:     e.cursorETag,
+		CursorETag:     e.cursorETag.Load().(string),
 		LastJournalTs:  e.lastJournalTs(),
 		LastChange:     time.Unix(0, e.lastChange.Load()),
 		CountersSince:  sinceT,

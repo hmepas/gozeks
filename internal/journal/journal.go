@@ -27,6 +27,7 @@ type Op struct {
 	Mtime int64  `json:"mtime,omitempty"` // unix seconds
 	Hash  string `json:"hash,omitempty"`  // "sha256:<hex>"
 	Prev  string `json:"prev,omitempty"`  // hash the uploader had before this change ("" for a new file)
+	ETag  string `json:"etag,omitempty"`  // ETag the bucket returned for the PUT
 }
 
 // Entry is one upload batch.

@@ -93,6 +93,11 @@ func withRelay(port int) opt {
 	}
 }
 
+// noRelay disables the relay role: pure marker polling.
+func noRelay() opt {
+	return func(c *config.Config) { c.Relay.Token = "" }
+}
+
 func withPoll(poll, fallback time.Duration) opt {
 	return func(c *config.Config) {
 		c.Sync.Poll.Duration = poll
@@ -250,10 +255,8 @@ func bucketKeys(t *testing.T, bucket, prefix string) []string {
 
 func TestCreateModifyDeletePropagate(t *testing.T) {
 	bucket := newBucket(t)
-	a := start(t, newConfig(t, bucket, "a"))
-	b := start(t, newConfig(t, bucket, "b"))
-	// no relay token in this test: pure polling
-	a.cfg.Relay.Token, b.cfg.Relay.Token = "", ""
+	a := start(t, newConfig(t, bucket, "a", noRelay()))
+	b := start(t, newConfig(t, bucket, "b", noRelay()))
 
 	a.write("Notes/one.md", "v1")
 	d := eventually(t, 10*time.Second, "create", func() bool { v, ok := b.read("Notes/one.md"); return ok && v == "v1" })
@@ -311,10 +314,9 @@ func TestSimultaneousEditOneConflict(t *testing.T) {
 
 func TestJournalRaceThirdNodeGetsBoth(t *testing.T) {
 	bucket := newBucket(t)
-	a := start(t, newConfig(t, bucket, "a"))
-	b := start(t, newConfig(t, bucket, "b"))
-	c := start(t, newConfig(t, bucket, "c", withPoll(3*time.Second, 3*time.Second)))
-	a.cfg.Relay.Token, b.cfg.Relay.Token, c.cfg.Relay.Token = "", "", ""
+	a := start(t, newConfig(t, bucket, "a", noRelay()))
+	b := start(t, newConfig(t, bucket, "b", noRelay()))
+	c := start(t, newConfig(t, bucket, "c", noRelay(), withPoll(3*time.Second, 3*time.Second)))
 	for i := 0; i < 3; i++ {
 		a.write(fmt.Sprintf("a%d.md", i), "a")
 		b.write(fmt.Sprintf("b%d.md", i), "b")
@@ -358,9 +360,8 @@ func TestCrashMidBatchHeals(t *testing.T) {
 
 func TestOwnDownloadsDoNotEcho(t *testing.T) {
 	bucket := newBucket(t)
-	a := start(t, newConfig(t, bucket, "a"))
-	b := start(t, newConfig(t, bucket, "b"))
-	a.cfg.Relay.Token, b.cfg.Relay.Token = "", ""
+	a := start(t, newConfig(t, bucket, "a", noRelay()))
+	b := start(t, newConfig(t, bucket, "b", noRelay()))
 	for i := 0; i < 5; i++ {
 		a.write(fmt.Sprintf("f%d.md", i), fmt.Sprint(i))
 	}

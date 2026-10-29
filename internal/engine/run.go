@@ -78,13 +78,8 @@ func (e *Engine) Run(ctx context.Context, opts RunOptions) error {
 	defer cancel()
 	var wg sync.WaitGroup
 
-	if !opts.SkipStartupReconcile {
-		if err := e.Reconcile(ctx, ReconcileOptions{}); err != nil {
-			e.log.Error("startup reconcile", "err", err)
-		}
-	}
-
-	// local changes → batches → uploads
+	// local changes → batches → uploads. Started before the startup reconcile
+	// so edits made during it are not lost until the next reconcile.
 	b := batch.New(e.cfg.Sync.Debounce.Duration, e.cfg.Sync.MaxBatchWait.Duration)
 	e.pend = b.Pending
 	events := make(chan string, 1024)
@@ -114,6 +109,12 @@ func (e *Engine) Run(ctx context.Context, opts RunOptions) error {
 			}
 		})
 	}()
+
+	if !opts.SkipStartupReconcile {
+		if err := e.Reconcile(ctx, ReconcileOptions{}); err != nil {
+			e.log.Error("startup reconcile", "err", err)
+		}
+	}
 
 	// relay role
 	e.OnKeys = e.announce
@@ -316,8 +317,13 @@ func (e *Engine) relayLoop(ctx context.Context, t Timings) {
 			continue
 		}
 		if lock != nil && !free && lock.Node != e.cfg.Node && lock.URL != "" {
-			e.follow(ctx, lock)
-			sleepCtx(ctx, time.Duration(rand.Int64N(int64(t.Backoff)+1)))
+			if e.follow(ctx, lock) {
+				sleepCtx(ctx, time.Duration(rand.Int64N(int64(t.Backoff)+1)))
+			} else {
+				// never connected (unreachable relay): re-read the lock at the
+				// slow follower cadence instead of hammering GET lock + dial
+				sleepCtx(ctx, t.LockPoll)
+			}
 			continue
 		}
 		sleepCtx(ctx, t.LockPoll)
@@ -373,8 +379,9 @@ func (e *Engine) lead(ctx context.Context, cert tls.Certificate, t Timings) {
 	}
 }
 
-// follow holds an SSE connection to the relay until it drops.
-func (e *Engine) follow(ctx context.Context, lock *relay.Lock) {
+// follow holds an SSE connection to the relay until it drops. It reports
+// whether the stream was ever established.
+func (e *Engine) follow(ctx context.Context, lock *relay.Lock) bool {
 	e.relay.mu.Lock()
 	e.relay.lock = lock
 	e.relay.mu.Unlock()
@@ -410,7 +417,7 @@ func (e *Engine) follow(ctx context.Context, lock *relay.Lock) {
 	e.relay.lock = nil
 	e.relay.mu.Unlock()
 	if ctx.Err() != nil {
-		return
+		return wasConnected
 	}
 	if errors.Is(err, relay.ErrLeaderGone) {
 		e.log.Info("relay stepped down")
@@ -418,6 +425,8 @@ func (e *Engine) follow(ctx context.Context, lock *relay.Lock) {
 		e.log.Warn("relay connection lost", "err", err)
 	} else {
 		e.log.Debug("relay unreachable", "url", lock.URL, "err", err)
+		return false // the poll loop keeps checking the marker on its own
 	}
-	e.pollOnce(ctx)
+	e.pollOnce(ctx) // catch up on keys pushed while the stream was closing
+	return true
 }

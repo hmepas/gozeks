@@ -348,6 +348,16 @@ egress to internet ₽1.377/GB, ingress free.
   is kept for environments where the image pulls.
 - **Not implemented** (nothing in the vault needs it): multipart upload, mobile, encryption.
 
+Review fixes (2026-10-29, after the first build):
+- `CheckCursor` is single-flighted (`pollMu`) and the cursor ETag is an atomic value: the poll
+  loop, the relay-connect catch-up and the relay-drop catch-up used to race on it.
+- A follower that cannot reach the relay (valid lock, unreachable URL) re-reads the lock at
+  `LockPoll` (30 s) instead of every few seconds; it relies on the normal marker poll meanwhile.
+- The watcher starts before the startup reconcile, so edits made during it are not lost.
+- Journal `put` ops carry the bucket ETag; the "identical content already on disk" path records
+  it, so reconcile does not re-fetch such files once.
+- Integration tests decide the relay token before starting a daemon (`noRelay()`), not after.
+
 ## Working rules for the building agent
 
 - Simplest thing that meets the spec. No plugin systems, no multi-bucket, no encryption layer,

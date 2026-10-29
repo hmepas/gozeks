@@ -21,6 +21,8 @@ import (
 // CheckCursor HEADs the marker and processes new journal entries when its
 // ETag changed. It returns the journal keys that were newly processed.
 func (e *Engine) CheckCursor(ctx context.Context) ([]string, error) {
+	e.pollMu.Lock()
+	defer e.pollMu.Unlock()
 	etag, _, err := e.st.Head(ctx, journal.CursorKey)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, nil
@@ -28,14 +30,14 @@ func (e *Engine) CheckCursor(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if etag == e.cursorETag {
+	if etag == e.cursorETag.Load().(string) {
 		return nil, nil
 	}
 	keys, err := e.processJournal(ctx)
 	if err != nil {
 		return keys, err
 	}
-	e.cursorETag = etag
+	e.cursorETag.Store(etag)
 	_ = e.idx.SetMeta(metaCursorETag, etag)
 	return keys, nil
 }
@@ -122,7 +124,7 @@ func (e *Engine) applyEntry(ctx context.Context, key string, entry *journal.Entr
 		var err error
 		switch op.Op {
 		case "put":
-			p, err = e.applyPut(ctx, op.Path, key, op.Hash, op.Prev, op.Mtime)
+			p, err = e.applyPut(ctx, op.Path, key, op.Hash, op.Prev, op.ETag, op.Mtime)
 		case "delete":
 			p, err = e.applyDelete(ctx, op.Path, stamp)
 		default:
@@ -150,7 +152,7 @@ func (e *Engine) applyEntry(ctx context.Context, key string, entry *journal.Entr
 // keep its own as a conflict copy); otherwise theirs takes the path and ours
 // becomes the conflict copy. Both nodes compare the same two timestamps, so
 // clock skew cannot make them disagree.
-func (e *Engine) applyPut(ctx context.Context, rel, key, remoteHash, prevHash string, remoteMtime int64) ([]string, error) {
+func (e *Engine) applyPut(ctx context.Context, rel, key, remoteHash, prevHash, remoteETag string, remoteMtime int64) ([]string, error) {
 	cur, has, err := e.idx.Get(rel)
 	if err != nil {
 		return nil, err
@@ -172,8 +174,13 @@ func (e *Engine) applyPut(ctx context.Context, rel, key, remoteHash, prevHash st
 		return nil, err
 	}
 	if loc != nil && remoteHash != "" && loc.hash == remoteHash {
-		// identical content already on disk (e.g. written on both nodes)
-		return nil, e.idx.Put(rel, index.Entry{Size: loc.size, Mtime: loc.mtime, Hash: loc.hash, ETag: cur.ETag, Journal: key})
+		// identical content already on disk (e.g. written on both nodes);
+		// record the remote ETag so reconcile does not re-fetch it
+		etag := remoteETag
+		if etag == "" {
+			etag = cur.ETag
+		}
+		return nil, e.idx.Put(rel, index.Entry{Size: loc.size, Mtime: loc.mtime, Hash: loc.hash, ETag: etag, Journal: key})
 	}
 	return e.pull(ctx, rel, key, idx, loc, divergent, remoteMtime)
 }

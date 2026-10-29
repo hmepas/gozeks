@@ -222,7 +222,7 @@ func (e *Engine) uploadOne(ctx context.Context, rel string) uploadResult {
 		return res
 	}
 	e.log.Debug("uploaded", "path", rel, "size", len(data))
-	res.op = &journal.Op{Op: "put", Path: rel, Size: int64(len(data)), Mtime: mtime, Hash: h, Prev: cur.Hash}
+	res.op = &journal.Op{Op: "put", Path: rel, Size: int64(len(data)), Mtime: mtime, Hash: h, Prev: cur.Hash, ETag: etag}
 	res.entry = &index.Entry{Size: int64(len(data)), Mtime: fi.ModTime().UnixNano(), Hash: h, ETag: etag}
 	return res
 }
