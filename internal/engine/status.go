@@ -22,9 +22,9 @@ type Status struct {
 	CursorETag     string         `json:"cursor_etag"`
 	LastJournalTs  int64          `json:"last_journal_ts"`
 	LastChange     time.Time      `json:"last_change"`
-	LastPollOK     time.Time      `json:"last_poll_ok"` // last successful marker HEAD
+	LastPollOK     time.Time      `json:"last_poll_ok,omitzero"` // last successful marker HEAD
 	LastError      string         `json:"last_error,omitempty"`
-	LastErrorAt    time.Time      `json:"last_error_at,omitempty"`
+	LastErrorAt    time.Time      `json:"last_error_at,omitzero"`
 	Errors         int64          `json:"errors"` // since StartedAt
 	Recent         []Change       `json:"recent"` // newest last
 	Counters       store.Snapshot `json:"counters"`

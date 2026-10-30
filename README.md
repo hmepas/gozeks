@@ -70,6 +70,7 @@ Service units for launchd (macOS) and systemd (Linux) are in `deploy/`.
 | `gozeks reconcile` | one full consistency pass |
 | `gozeks status` | health, connected peers, last 50 changes, request counters (for cost tracking) |
 | `gozeks status --check` | exit 1 when the daemon is down, the bucket was unreachable for 5 min, or an error is less than 10 min old; for cron / health pings |
+| `gozeks status --json` | the raw snapshot plus a `problems` array; the contract for widgets is in `WIDGET_SPEC.md` |
 | `gozeks trash list / restore` | files removed by remote deletes |
 
 ## Configuration
@@ -113,6 +114,8 @@ last 50 changes with the node that made them. Logs (`log/slog`) go to stderr: on
 batch with the paths when a batch has at most 10 of them, warnings for conflicts and skipped
 paths, `level=ERROR` for anything that failed. A reconcile line with `upload=0 download=0
 trash=0` and equal remote/local/indexed counts means the node is fully in sync.
+`WIDGET_SPEC.md` documents the snapshot field by field, with the health rules, for building
+status-bar items, widgets or health checks on top of it.
 
 ## Development
 

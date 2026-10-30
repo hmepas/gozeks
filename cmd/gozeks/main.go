@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,9 +31,10 @@ commands:
   push [--dry-run] [--force]   upload local folder into an (empty) bucket
   pull [--dry-run] [--force]   download bucket into an (empty) local folder
   reconcile [--dry-run]  one full reconcile pass
-  status [--check]       health, peers, recent changes, request counters;
+  status [--check|--json]  health, peers, recent changes, request counters;
                          --check exits 1 when the daemon is stale, the bucket
-                         was unreachable for 5 min, or an error is < 10 min old
+                         was unreachable for 5 min, or an error is < 10 min old;
+                         --json prints status.json plus "problems" (see WIDGET_SPEC.md)
   trash list             files removed by remote deletes
   trash restore ID/PATH  move a trashed file back into the folder
   index forget PREFIX    drop index entries under PREFIX (daemon must be stopped);
@@ -165,12 +167,25 @@ func cmdPull(ctx context.Context, cfg *config.Config, e *engine.Engine, st *stor
 func cmdStatus(cfg *config.Config, args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	check := fs.Bool("check", false, "exit 1 when unhealthy (for cron / health pings)")
+	asJSON := fs.Bool("json", false, "print status.json as is, plus a problems array")
 	_ = fs.Parse(args)
 	s, err := engine.ReadStatus(cfg.StateDir)
 	if err != nil {
 		return fmt.Errorf("no status file in %s (daemon never ran?): %w", cfg.StateDir, err)
 	}
 	problems := healthProblems(s, time.Now())
+	if *asJSON {
+		out := struct {
+			*engine.Status
+			Problems []string `json:"problems"`
+		}{s, problems}
+		if out.Problems == nil {
+			out.Problems = []string{}
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(out)
+	}
 	if *check {
 		for _, p := range problems {
 			fmt.Println(p)

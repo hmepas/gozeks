@@ -379,6 +379,8 @@ Monitoring (2026-10-30):
   leader, can show the fleet in `status`. The list is in-memory only; nothing is written to
   the bucket for it.
 - Batch log lines include the paths when a batch has ≤ 10 ops.
+- `gozeks status --json` prints the snapshot plus `problems`; `WIDGET_SPEC.md` is the contract
+  for external widgets/monitors. Keep it in step with `engine.Status` and `healthProblems`.
 - `<config dir>/env` is read by `config.Load` (process environment wins). Commands that do
   not touch the bucket (`status`, `trash`, `index`) no longer require credentials at all.
 
