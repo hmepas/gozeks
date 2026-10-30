@@ -40,7 +40,19 @@ type relayState struct {
 	connected atomic.Bool
 	mu        sync.Mutex
 	srv       *relay.Server
-	lock      *relay.Lock // the relay we follow
+	lock      *relay.Lock  // the relay we follow
+	peers     []relay.Peer // last peer list sent by the relay we follow
+}
+
+// peerList is the fleet as we know it: the relay's list when we are the relay,
+// otherwise what the relay last told us; nil when not connected.
+func (r *relayState) peerList() []relay.Peer {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.srv != nil {
+		return r.srv.Peers()
+	}
+	return r.peers
 }
 
 func (r *relayState) server() *relay.Server {
@@ -339,7 +351,7 @@ func nodeOf(l *relay.Lock) string {
 
 // lead runs the relay server and renews the lease until we lose it.
 func (e *Engine) lead(ctx context.Context, cert tls.Certificate, t Timings) {
-	srv := relay.NewServer(e.cfg.Relay.Listen, e.cfg.Relay.Token, cert, e.log)
+	srv := relay.NewServer(e.cfg.Node, e.cfg.Relay.Listen, e.cfg.Relay.Token, cert, e.log)
 	if err := srv.Start(); err != nil {
 		e.log.Error("relay listen", "err", err)
 		sleepCtx(ctx, t.Backoff)
@@ -400,7 +412,7 @@ func (e *Engine) follow(ctx context.Context, lock *relay.Lock) bool {
 			}
 		}
 	}()
-	err := relay.Subscribe(ctx, lock.URL, lock.CertSHA256, e.cfg.Relay.Token,
+	err := relay.Subscribe(ctx, lock.URL, lock.CertSHA256, e.cfg.Relay.Token, e.cfg.Node,
 		func() {
 			e.relay.connected.Store(true)
 			e.log.Info("connected to relay", "url", lock.URL, "node", lock.Node)
@@ -411,10 +423,16 @@ func (e *Engine) follow(ctx context.Context, lock *relay.Lock) bool {
 			case keys <- k:
 			default:
 			}
+		},
+		func(p []relay.Peer) {
+			e.relay.mu.Lock()
+			e.relay.peers = p
+			e.relay.mu.Unlock()
 		})
 	wasConnected := e.relay.connected.Swap(false)
 	e.relay.mu.Lock()
 	e.relay.lock = nil
+	e.relay.peers = nil
 	e.relay.mu.Unlock()
 	if ctx.Err() != nil {
 		return wasConnected

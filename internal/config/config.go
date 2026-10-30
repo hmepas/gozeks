@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"os"
@@ -85,10 +86,15 @@ func DefaultPath() string {
 }
 
 // Load reads the file, fills defaults and pulls secrets from the environment.
+// An `env` file next to the config (KEY=VALUE lines, the same file the service
+// units point at) is read first; variables already set in the process win.
 func Load(path string) (*Config, error) {
 	c := &Config{}
 	if _, err := toml.DecodeFile(path, c); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
+	}
+	if err := loadEnvFile(filepath.Join(filepath.Dir(path), "env")); err != nil {
+		return nil, err
 	}
 	if err := c.finish(); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
@@ -116,9 +122,6 @@ func (c *Config) finish() error {
 	}
 	c.S3.AccessKey = firstEnv("GOZEKS_S3_ACCESS_KEY", "AWS_ACCESS_KEY_ID")
 	c.S3.SecretKey = firstEnv("GOZEKS_S3_SECRET_KEY", "AWS_SECRET_ACCESS_KEY")
-	if c.S3.AccessKey == "" || c.S3.SecretKey == "" {
-		return errors.New("GOZEKS_S3_ACCESS_KEY / GOZEKS_S3_SECRET_KEY not set")
-	}
 	c.Relay.Token = os.Getenv("GOZEKS_RELAY_TOKEN")
 	if c.Relay.Listen != "" && c.Relay.Advertise == "" {
 		return errors.New("relay.advertise is required when relay.listen is set")
@@ -141,6 +144,52 @@ func (c *Config) finish() error {
 		c.Sync.Exclude = append([]string(nil), DefaultExcludes...)
 	}
 	return nil
+}
+
+// ErrNoCredentials is returned by CheckCredentials when the S3 keys are missing.
+var ErrNoCredentials = errors.New("GOZEKS_S3_ACCESS_KEY / GOZEKS_S3_SECRET_KEY not set (environment or the env file next to the config)")
+
+// CheckCredentials fails when the bucket keys are missing. Commands that only
+// read local state (status, trash) do not call it.
+func (c *Config) CheckCredentials() error {
+	if c.S3.AccessKey == "" || c.S3.SecretKey == "" {
+		return ErrNoCredentials
+	}
+	return nil
+}
+
+// loadEnvFile sets KEY=VALUE pairs from path into the process environment,
+// skipping keys that are already set. A missing file is not an error.
+func loadEnvFile(path string) error {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+			v = v[1 : len(v)-1]
+		}
+		if _, set := os.LookupEnv(k); !set {
+			_ = os.Setenv(k, v)
+		}
+	}
+	return sc.Err()
 }
 
 func firstEnv(keys ...string) string {

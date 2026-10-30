@@ -5,7 +5,8 @@
   Install:
     sed "s|HOME|$HOME|g" deploy/com.hmepas.gozeks.plist > ~/Library/LaunchAgents/com.hmepas.gozeks.plist
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hmepas.gozeks.plist
-  Secrets are read from ~/.config/gozeks/env (mode 0600).
+  Secrets are read from ~/.config/gozeks/env (mode 0600); gozeks reads that file itself,
+  the shell wrapper below only keeps older binaries working.
 -->
 <plist version="1.0">
 <dict>

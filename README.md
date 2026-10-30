@@ -46,8 +46,7 @@ make build-linux      # static linux/amd64 binary in dist/
 
 mkdir -p ~/.config/gozeks
 cp deploy/config.example.toml ~/.config/gozeks/config.toml   # edit node name, root, endpoint, bucket
-export GOZEKS_S3_ACCESS_KEY=...
-export GOZEKS_S3_SECRET_KEY=...
+cp deploy/env.example ~/.config/gozeks/env && chmod 600 ~/.config/gozeks/env   # S3 keys, relay token
 
 # first node: seed the empty bucket from your folder
 gozeks push
@@ -69,7 +68,8 @@ Service units for launchd (macOS) and systemd (Linux) are in `deploy/`.
 | `gozeks push` | one-shot upload of the folder into an empty bucket |
 | `gozeks pull` | one-shot download of the bucket into an empty folder |
 | `gozeks reconcile` | one full consistency pass |
-| `gozeks status` | index size, last cursor, request counters (for cost tracking) |
+| `gozeks status` | health, connected peers, last 50 changes, request counters (for cost tracking) |
+| `gozeks status --check` | exit 1 when the daemon is down, the bucket was unreachable for 5 min, or an error is less than 10 min old; for cron / health pings |
 | `gozeks trash list / restore` | files removed by remote deletes |
 
 ## Configuration
@@ -87,7 +87,9 @@ See `deploy/config.example.toml`. The important knobs:
   `.obsidian/` settings and plugins, is synced.
 
 Credentials are read from `GOZEKS_S3_ACCESS_KEY` / `GOZEKS_S3_SECRET_KEY` (or the standard
-`AWS_*` variables) and are never written to the config or logs.
+`AWS_*` variables) and are never written to the config or logs. An `env` file next to the
+config (`~/.config/gozeks/env`, `KEY=VALUE` lines, mode 0600) is read automatically; variables
+already set in the environment take precedence. The service units point at the same file.
 
 ## Migrating from a cloud-drive folder
 
@@ -101,6 +103,16 @@ Credentials are read from `GOZEKS_S3_ACCESS_KEY` / `GOZEKS_S3_SECRET_KEY` (or th
 On Selectel's 2026 prices a Mac plus two servers comes to roughly ₽55/month: the relay's
 polling, lease renewals, a few hundred uploads a day and a 1 GB vault with versions.
 `gozeks status` shows live request counters so you can check.
+
+## Monitoring
+
+The daemon writes `<state dir>/status.json` every 10 s; `gozeks status` prints it:
+whether the daemon is alive, when the bucket was last reached, the last error, the nodes
+currently connected to the relay (every node gets the full list from the relay), and the
+last 50 changes with the node that made them. Logs (`log/slog`) go to stderr: one line per
+batch with the paths when a batch has at most 10 of them, warnings for conflicts and skipped
+paths, `level=ERROR` for anything that failed. A reconcile line with `upload=0 download=0
+trash=0` and equal remote/local/indexed counts means the node is fully in sync.
 
 ## Development
 

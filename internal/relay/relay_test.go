@@ -12,7 +12,7 @@ func TestNotifyAndSubscribe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := NewServer("127.0.0.1:0", "tok", cert, slog.Default())
+	s := NewServer("srv", "127.0.0.1:0", "tok", cert, slog.Default())
 	if err := s.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -20,14 +20,26 @@ func TestNotifyAndSubscribe(t *testing.T) {
 	fp := s.Fingerprint()
 
 	got := make(chan string, 10)
+	peers := make(chan []Peer, 10)
 	connected := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errc := make(chan error, 1)
 	go func() {
-		errc <- Subscribe(ctx, url, fp, "tok", func() { close(connected) }, func(k string) { got <- k })
+		errc <- Subscribe(ctx, url, fp, "tok", "cli", func() { close(connected) }, func(k string) { got <- k }, func(p []Peer) { peers <- p })
 	}()
 	<-connected
+	select {
+	case p := <-peers:
+		if len(p) != 2 || !p[0].Relay || p[0].Node != "srv" || p[1].Node != "cli" {
+			t.Fatalf("peers = %+v", p)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no peers event")
+	}
+	if p := s.Peers(); len(p) != 2 || p[1].Node != "cli" {
+		t.Fatalf("server peers = %+v", p)
+	}
 
 	if err := Notify(ctx, url, fp, "tok", []string{"_sync/journal/a", "_sync/journal/b"}); err != nil {
 		t.Fatal(err)

@@ -182,6 +182,7 @@ func (e *Engine) Reconcile(ctx context.Context, opts ReconcileOptions) error {
 			e.log.Error("trash", "path", rel, "err", err)
 			continue
 		}
+		e.noteChange("delete", rel, "reconcile")
 		_ = e.idx.Delete(rel)
 	}
 	pending := e.downloadMany(ctx, toDownload)

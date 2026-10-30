@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -37,21 +38,33 @@ type notifyBody struct {
 	Keys []string `json:"keys"`
 }
 
-// Server is the relay HTTP server.
-type Server struct {
-	token string
-	log   *slog.Logger
-	cert  tls.Certificate
-	srv   *http.Server
-	ln    net.Listener
-
-	mu   sync.Mutex
-	subs map[chan string]struct{}
+// Peer is one node connected to the relay (or the relay itself). The relay
+// sends the full list to every client whenever it changes, so each node knows
+// who else is online.
+type Peer struct {
+	Node  string    `json:"node"`
+	Since time.Time `json:"since"`
+	Relay bool      `json:"relay,omitempty"`
 }
 
-// NewServer prepares a server; call Start to listen.
-func NewServer(listen, token string, cert tls.Certificate, log *slog.Logger) *Server {
-	s := &Server{token: token, log: log, cert: cert, subs: map[chan string]struct{}{}}
+// Server is the relay HTTP server.
+type Server struct {
+	node    string
+	token   string
+	log     *slog.Logger
+	cert    tls.Certificate
+	srv     *http.Server
+	ln      net.Listener
+	started time.Time
+
+	mu   sync.Mutex
+	subs map[chan string]Peer
+}
+
+// NewServer prepares a server; call Start to listen. node is the relay's own
+// name, reported to clients in the peer list.
+func NewServer(node, listen, token string, cert tls.Certificate, log *slog.Logger) *Server {
+	s := &Server{node: node, token: token, log: log, cert: cert, subs: map[chan string]Peer{}, started: time.Now()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/notify", s.handleNotify)
 	mux.HandleFunc("/events", s.handleEvents)
@@ -121,11 +134,32 @@ func (s *Server) send(event, data string) {
 	}
 }
 
-// Subscribers returns the number of connected clients.
-func (s *Server) Subscribers() int {
+// Peers lists the relay itself followed by every connected client, oldest first.
+func (s *Server) Peers() []Peer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.subs)
+	return s.peersLocked()
+}
+
+func (s *Server) peersLocked() []Peer {
+	out := []Peer{{Node: s.node, Since: s.started, Relay: true}}
+	for _, p := range s.subs {
+		out = append(out, p)
+	}
+	sort.Slice(out[1:], func(i, j int) bool { return out[i+1].Since.Before(out[j+1].Since) })
+	return out
+}
+
+// sendPeers broadcasts the current peer list. Caller holds s.mu.
+func (s *Server) sendPeersLocked() {
+	b, _ := json.Marshal(s.peersLocked())
+	msg := fmt.Sprintf("event: peers\ndata: %s\n\n", b)
+	for ch := range s.subs {
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
 }
 
 func (s *Server) authorized(r *http.Request) bool {
@@ -166,15 +200,21 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, ": connected\n\n")
 	fl.Flush()
 
+	node := r.Header.Get("X-Gozeks-Node")
+	if node == "" {
+		node = r.RemoteAddr
+	}
 	ch := make(chan string, 256)
 	s.mu.Lock()
-	s.subs[ch] = struct{}{}
+	s.subs[ch] = Peer{Node: node, Since: time.Now()}
+	s.sendPeersLocked()
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		if _, ok := s.subs[ch]; ok {
 			delete(s.subs, ch)
 			close(ch)
+			s.sendPeersLocked()
 		}
 		s.mu.Unlock()
 	}()
@@ -227,16 +267,18 @@ func Notify(ctx context.Context, url, fingerprint, token string, keys []string) 
 // ErrLeaderGone is returned by Subscribe when the relay announces shutdown.
 var ErrLeaderGone = errors.New("relay: leader stepped down")
 
-// Subscribe connects to the relay's event stream and calls onKey for every
-// journal key until the connection drops, the relay steps down, or ctx ends.
-// onConnected is called once the stream is open.
-func Subscribe(ctx context.Context, url, fingerprint, token string, onConnected func(), onKey func(string)) error {
+// Subscribe connects to the relay's event stream as node and calls onKey for
+// every journal key until the connection drops, the relay steps down, or ctx
+// ends. onConnected is called once the stream is open; onPeers (optional)
+// whenever the relay sends the list of connected nodes.
+func Subscribe(ctx context.Context, url, fingerprint, token, node string, onConnected func(), onKey func(string), onPeers func([]Peer)) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(url, "/")+"/events", nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("X-Gozeks-Node", node)
 	tr := &http.Transport{
 		TLSClientConfig:       pinnedTLS(fingerprint),
 		ResponseHeaderTimeout: 10 * time.Second,
@@ -281,10 +323,16 @@ func Subscribe(ctx context.Context, url, fingerprint, token string, onConnected 
 		line = strings.TrimRight(line, "\r\n")
 		switch {
 		case line == "":
-			if event == "key" && data != "" {
+			switch {
+			case event == "key" && data != "":
 				onKey(data)
-			} else if event == "leader" {
+			case event == "leader":
 				return ErrLeaderGone
+			case event == "peers" && onPeers != nil:
+				var peers []Peer
+				if json.Unmarshal([]byte(data), &peers) == nil {
+					onPeers(peers)
+				}
 			}
 			event, data = "", ""
 		case strings.HasPrefix(line, "event: "):

@@ -30,7 +30,9 @@ commands:
   push [--dry-run] [--force]   upload local folder into an (empty) bucket
   pull [--dry-run] [--force]   download bucket into an (empty) local folder
   reconcile [--dry-run]  one full reconcile pass
-  status                 index stats, cursor, request counters, relay role
+  status [--check]       health, peers, recent changes, request counters;
+                         --check exits 1 when the daemon is stale, the bucket
+                         was unreachable for 5 min, or an error is < 10 min old
   trash list             files removed by remote deletes
   trash restore ID/PATH  move a trashed file back into the folder
   index forget PREFIX    drop index entries under PREFIX (daemon must be stopped);
@@ -59,7 +61,7 @@ func main() {
 	cmd, args := flag.Arg(0), flag.Args()[1:]
 	switch cmd {
 	case "status":
-		err = cmdStatus(cfg)
+		err = cmdStatus(cfg, args)
 	case "trash":
 		err = cmdTrash(cfg, args)
 	case "index":
@@ -96,6 +98,9 @@ func fatal(err error) {
 }
 
 func withEngine(cfg *config.Config, log *slog.Logger, fn func(context.Context, *engine.Engine, *store.Store) error) error {
+	if err := cfg.CheckCredentials(); err != nil {
+		return err
+	}
 	st, err := store.New(cfg.S3)
 	if err != nil {
 		return err
@@ -157,38 +162,105 @@ func cmdPull(ctx context.Context, cfg *config.Config, e *engine.Engine, st *stor
 	return e.Reconcile(ctx, engine.ReconcileOptions{AllowEmptyLocal: true})
 }
 
-func cmdStatus(cfg *config.Config) error {
+func cmdStatus(cfg *config.Config, args []string) error {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	check := fs.Bool("check", false, "exit 1 when unhealthy (for cron / health pings)")
+	_ = fs.Parse(args)
 	s, err := engine.ReadStatus(cfg.StateDir)
 	if err != nil {
 		return fmt.Errorf("no status file in %s (daemon never ran?): %w", cfg.StateDir, err)
 	}
+	problems := healthProblems(s, time.Now())
+	if *check {
+		for _, p := range problems {
+			fmt.Println(p)
+		}
+		if len(problems) > 0 {
+			os.Exit(1)
+		}
+		fmt.Println("ok")
+		return nil
+	}
 	age := time.Since(s.UpdatedAt).Round(time.Second)
 	alive := "running"
-	if age > 30*time.Second {
+	if age > staleAfter {
 		alive = "stale, daemon probably stopped"
 	}
-	fmt.Printf("node:            %s (%s, status age %s)\n", s.Node, alive, age)
+	fmt.Printf("node:            %s (%s, status age %s, up since %s)\n", s.Node, alive, age, s.StartedAt.Format("2006-01-02 15:04"))
 	fmt.Printf("root:            %s\n", cfg.Root)
 	fmt.Printf("index:           %d files\n", s.IndexCount)
 	fmt.Printf("pending batch:   %d paths\n", s.Pending)
-	fmt.Printf("cursor etag:     %s\n", s.CursorETag)
+	fmt.Printf("last poll ok:    %s\n", ago(s.LastPollOK))
+	fmt.Printf("last change:     %s\n", ago(s.LastChange))
 	if s.LastJournalTs > 0 {
-		fmt.Printf("last journal:    %s\n", time.UnixMilli(s.LastJournalTs).Format(time.RFC3339))
+		fmt.Printf("last journal:    %s\n", ago(time.UnixMilli(s.LastJournalTs)))
 	}
-	fmt.Printf("last change:     %s\n", s.LastChange.Format(time.RFC3339))
+	fmt.Printf("errors:          %d since start", s.Errors)
+	if s.LastError != "" {
+		fmt.Printf("; last %s: %s", ago(s.LastErrorAt), s.LastError)
+	}
+	fmt.Println()
 	fmt.Printf("relay role:      %s", s.Role)
 	if s.RelayConnected {
 		fmt.Printf(", connected to %s", s.RelayURL)
 	}
-	if s.Role == "leader" {
-		fmt.Printf(", %d subscribers", s.Subscribers)
-	}
 	fmt.Println()
+	if len(s.Peers) > 0 {
+		var parts []string
+		for _, p := range s.Peers {
+			tag := "since"
+			if p.Relay {
+				tag = "relay, since"
+			}
+			parts = append(parts, fmt.Sprintf("%s (%s %s)", p.Node, tag, p.Since.Local().Format("01-02 15:04")))
+		}
+		fmt.Printf("peers:           %s\n", strings.Join(parts, ", "))
+	}
+	for _, p := range problems {
+		fmt.Printf("PROBLEM:         %s\n", p)
+	}
 	c := s.Counters
 	fmt.Printf("requests since %s:\n", s.CountersSince.Format("2006-01-02 15:04"))
 	fmt.Printf("  PUT/POST:      %d\n  GET/HEAD/LIST: %d\n  DELETE:        %d\n  bytes up:      %s\n  bytes down:    %s\n",
 		c.Put, c.Get, c.Delete, human(c.BytesUp), human(c.BytesDown))
+	if len(s.Recent) > 0 {
+		fmt.Printf("recent changes (newest last):\n")
+		for _, ch := range s.Recent {
+			fmt.Printf("  %s %-8s %-10s %s\n", ch.At.Local().Format("01-02 15:04:05"), ch.Op, ch.Node, ch.Path)
+		}
+	}
 	return nil
+}
+
+const (
+	staleAfter    = 30 * time.Second // status.json is rewritten every 10 s
+	pollGrace     = 5 * time.Minute
+	recentErrorIn = 10 * time.Minute
+)
+
+// healthProblems is the rule set behind `status --check`.
+func healthProblems(s *engine.Status, now time.Time) []string {
+	var out []string
+	if age := now.Sub(s.UpdatedAt); age > staleAfter {
+		out = append(out, fmt.Sprintf("daemon not running: status is %s old", age.Round(time.Second)))
+	}
+	switch {
+	case !s.LastPollOK.IsZero() && now.Sub(s.LastPollOK) > pollGrace:
+		out = append(out, fmt.Sprintf("bucket unreachable: last successful poll %s", ago(s.LastPollOK)))
+	case s.LastPollOK.IsZero() && now.Sub(s.StartedAt) > pollGrace:
+		out = append(out, "bucket unreachable: no successful poll since start")
+	}
+	if s.LastError != "" && now.Sub(s.LastErrorAt) < recentErrorIn {
+		out = append(out, fmt.Sprintf("error %s: %s", ago(s.LastErrorAt), s.LastError))
+	}
+	return out
+}
+
+func ago(t time.Time) string {
+	if t.IsZero() || t.Unix() <= 0 {
+		return "never"
+	}
+	return fmt.Sprintf("%s (%s ago)", t.Local().Format("2006-01-02 15:04:05"), time.Since(t).Round(time.Second))
 }
 
 func human(n int64) string {

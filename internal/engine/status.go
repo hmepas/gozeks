@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/hmepas/gozeks/internal/relay"
 	"github.com/hmepas/gozeks/internal/store"
 )
 
@@ -15,14 +16,20 @@ type Status struct {
 	Role           string         `json:"relay_role"` // none | follower | leader | candidate
 	RelayConnected bool           `json:"relay_connected"`
 	RelayURL       string         `json:"relay_url,omitempty"`
-	Subscribers    int            `json:"relay_subscribers,omitempty"`
+	Peers          []relay.Peer   `json:"peers,omitempty"` // the fleet as reported by the relay (incl. us)
 	Pending        int            `json:"pending_paths"`
 	IndexCount     int            `json:"index_count"`
 	CursorETag     string         `json:"cursor_etag"`
 	LastJournalTs  int64          `json:"last_journal_ts"`
 	LastChange     time.Time      `json:"last_change"`
+	LastPollOK     time.Time      `json:"last_poll_ok"` // last successful marker HEAD
+	LastError      string         `json:"last_error,omitempty"`
+	LastErrorAt    time.Time      `json:"last_error_at,omitempty"`
+	Errors         int64          `json:"errors"` // since StartedAt
+	Recent         []Change       `json:"recent"` // newest last
 	Counters       store.Snapshot `json:"counters"`
 	CountersSince  time.Time      `json:"counters_since"`
+	StartedAt      time.Time      `json:"started_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
 	PID            int            `json:"pid"`
 }
@@ -44,18 +51,24 @@ func (e *Engine) status(counters *store.Counters) Status {
 		CursorETag:     e.cursorETag.Load().(string),
 		LastJournalTs:  e.lastJournalTs(),
 		LastChange:     time.Unix(0, e.lastChange.Load()),
+		Peers:          e.relay.peerList(),
 		CountersSince:  sinceT,
+		StartedAt:      e.startedAt,
 		UpdatedAt:      time.Now(),
 		PID:            os.Getpid(),
 	}
+	if v := e.lastPollOK.Load(); v > 0 {
+		s.LastPollOK = time.Unix(0, v)
+	}
+	e.healthMu.Lock()
+	s.LastError, s.LastErrorAt, s.Errors = e.lastErr, e.lastErrAt, e.errCount
+	s.Recent = append([]Change(nil), e.recent...)
+	e.healthMu.Unlock()
 	if counters != nil {
 		s.Counters = counters.Snapshot()
 	}
 	if e.pend != nil {
 		s.Pending = e.pend()
-	}
-	if srv := e.relay.server(); srv != nil {
-		s.Subscribers = srv.Subscribers()
 	}
 	return s
 }
@@ -105,3 +118,6 @@ func (e *Engine) Role() string { return e.relay.role.Load().(string) }
 
 // RelayConnected reports whether an SSE connection to a relay is open.
 func (e *Engine) RelayConnected() bool { return e.relay.connected.Load() }
+
+// Peers returns the fleet as the relay reports it (nil when not connected).
+func (e *Engine) Peers() []relay.Peer { return e.relay.peerList() }

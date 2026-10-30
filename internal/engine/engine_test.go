@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -643,5 +644,41 @@ func TestNFDOnDiskNameIsNotACaseConflict(t *testing.T) {
 	body, _, _, _ := fs.Get(context.Background(), "data/"+nfc(nfd))
 	if string(body) != "v2" {
 		t.Fatal("edit of NFD-named file not uploaded under NFC key")
+	}
+}
+
+func TestStatusTracksChangesAndErrors(t *testing.T) {
+	fs := newFake()
+	a := newNode(t, fs, "a")
+	b := newNode(t, fs, "b")
+	a.write(t, "Notes/x.md", "v1")
+	a.upload(t, "Notes/x.md")
+	b.poll(t)
+	os.Remove(filepath.Join(a.root, "Notes/x.md"))
+	a.upload(t, "Notes/x.md")
+	b.poll(t)
+
+	sa := a.e.status(nil)
+	if len(sa.Recent) != 2 || sa.Recent[0].Op != "put" || sa.Recent[1].Op != "delete" || sa.Recent[0].Node != "a" {
+		t.Fatalf("a recent = %+v", sa.Recent)
+	}
+	sb := b.e.status(nil)
+	if len(sb.Recent) != 2 || sb.Recent[0].Op != "put" || sb.Recent[0].Node != "a" || sb.Recent[1].Op != "delete" || sb.Recent[1].Path != "Notes/x.md" {
+		t.Fatalf("b recent = %+v", sb.Recent)
+	}
+	if sb.LastPollOK.IsZero() || sb.Errors != 0 || sb.LastError != "" {
+		t.Fatalf("health = poll %v errors %d %q", sb.LastPollOK, sb.Errors, sb.LastError)
+	}
+	b.e.log.Error("download", "path", "Notes/y.md", "err", errors.New("boom"))
+	sb = b.e.status(nil)
+	if sb.Errors != 1 || !strings.Contains(sb.LastError, "boom") || sb.LastErrorAt.IsZero() {
+		t.Fatalf("error not tapped: %+v", sb)
+	}
+	// ring is bounded
+	for i := 0; i < recentMax+5; i++ {
+		a.e.noteChange("put", "p", "a")
+	}
+	if n := len(a.e.status(nil).Recent); n != recentMax {
+		t.Fatalf("recent len %d", n)
 	}
 }

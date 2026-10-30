@@ -407,6 +407,12 @@ func TestRelayFastPathAndFailover(t *testing.T) {
 	a := start(t, newConfig(t, bucket, "a", slow))
 	b := start(t, newConfig(t, bucket, "b", slow))
 	eventually(t, 10*time.Second, "a and b connected", func() bool { return a.e.RelayConnected() && b.e.RelayConnected() })
+	// every node learns the whole fleet from the relay
+	fleet := func(e *engine.Engine) bool {
+		p := e.Peers()
+		return len(p) == 3 && p[0].Relay && p[0].Node == "relay1"
+	}
+	eventually(t, 5*time.Second, "peer lists", func() bool { return fleet(r.e) && fleet(a.e) && fleet(b.e) })
 
 	a.write("fast.md", "hello")
 	d := eventually(t, 5*time.Second, "relay delivery", func() bool { v, _ := b.read("fast.md"); return v == "hello" })
@@ -426,6 +432,10 @@ func TestRelayFastPathAndFailover(t *testing.T) {
 	d = eventually(t, 30*time.Second, "relay2 leads", func() bool { return c.e.Role() == "leader" })
 	t.Logf("failover took %s", d)
 	eventually(t, 15*time.Second, "b reconnects", func() bool { return b.e.RelayConnected() })
+	eventually(t, 5*time.Second, "b sees new fleet", func() bool {
+		p := b.e.Peers()
+		return len(p) == 3 && p[0].Node == "relay2"
+	})
 
 	// the old leader comes back and must stay a follower
 	r = start(t, cfgR)

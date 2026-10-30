@@ -368,6 +368,20 @@ egress to internet ₽1.377/GB, ingress free.
   synced; a repair tool, used only with the daemon stopped.
 - **Not implemented** (nothing in the vault needs it): multipart upload, mobile, encryption.
 
+Monitoring (2026-10-30):
+- `status.json` carries `last_poll_ok` (last successful marker HEAD), `last_error` /
+  `last_error_at` / `errors` (every Error-level log record is tapped by a slog.Handler wrapper,
+  so the status never disagrees with the log), `started_at`, and `recent`: the last 50 changes
+  (op, path, node, time) applied or uploaded. `gozeks status --check` exits 1 when the status
+  is older than 30 s, the bucket has not answered for 5 min, or an error is < 10 min old.
+- The relay tracks who is connected (clients send `X-Gozeks-Node`) and pushes a `peers` SSE
+  event with the full list (relay first) on every join/leave, so every node, not only the
+  leader, can show the fleet in `status`. The list is in-memory only; nothing is written to
+  the bucket for it.
+- Batch log lines include the paths when a batch has ≤ 10 ops.
+- `<config dir>/env` is read by `config.Load` (process environment wins). Commands that do
+  not touch the bucket (`status`, `trash`, `index`) no longer require credentials at all.
+
 Review fixes (2026-10-29, after the first build):
 - `CheckCursor` is single-flighted (`pollMu`) and the cursor ETag is an atomic value: the poll
   loop, the relay-connect catch-up and the relay-drop catch-up used to race on it.

@@ -260,21 +260,31 @@ func (e *Engine) commit(ctx context.Context, ops []journal.Op, puts map[string]i
 	if _, err := e.st.Put(ctx, journal.CursorKey, cur, nil); err != nil {
 		return "", fmt.Errorf("cursor: %w", err)
 	}
+	var paths []string
 	for rel, ent := range puts {
 		ent.Journal = key
 		if err := e.idx.Put(rel, ent); err != nil {
 			return "", err
 		}
+		e.noteChange("put", rel, e.cfg.Node)
+		paths = append(paths, rel)
 	}
 	for _, rel := range dels {
 		if err := e.idx.Delete(rel); err != nil {
 			return "", err
 		}
+		e.noteChange("delete", rel, e.cfg.Node)
+		paths = append(paths, rel)
 	}
 	_ = e.idx.MarkProcessed(key)
 	e.setLastJournalTs(ts)
 	e.touch()
-	e.log.Info("batch uploaded", "key", key, "puts", len(puts), "deletes", len(dels))
+	args := []any{"key", key, "puts", len(puts), "deletes", len(dels)}
+	if len(paths) <= logPathsMax {
+		sort.Strings(paths)
+		args = append(args, "paths", paths)
+	}
+	e.log.Info("batch uploaded", args...)
 	if e.OnKeys != nil {
 		go e.OnKeys([]string{key})
 	}

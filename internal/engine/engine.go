@@ -73,6 +73,67 @@ type Engine struct {
 
 	relay relayState
 	pend  func() int // pending batch size, set by Run
+
+	// health, reported through status.json
+	startedAt  time.Time
+	lastPollOK atomic.Int64 // unix nanos of the last successful marker HEAD
+	healthMu   sync.Mutex
+	lastErr    string
+	lastErrAt  time.Time
+	errCount   int64
+	recent     []Change // newest last, at most recentMax
+}
+
+// Change is one applied or uploaded operation, kept for `gozeks status`.
+type Change struct {
+	Op   string    `json:"op"`   // put | delete | conflict
+	Path string    `json:"path"` // for conflict: the conflict copy
+	Node string    `json:"node"` // node whose edit this is ("reconcile" when found by drift repair)
+	At   time.Time `json:"at"`
+}
+
+const recentMax = 50
+
+// noteChange appends to the recent-changes ring.
+func (e *Engine) noteChange(op, rel, node string) {
+	e.healthMu.Lock()
+	defer e.healthMu.Unlock()
+	e.recent = append(e.recent, Change{Op: op, Path: rel, Node: node, At: time.Now()})
+	if n := len(e.recent) - recentMax; n > 0 {
+		e.recent = append(e.recent[:0], e.recent[n:]...)
+	}
+}
+
+// errTap is a slog.Handler wrapper that records every Error-level record on
+// the engine, so status can show the last error without parsing logs.
+type errTap struct {
+	slog.Handler
+	e *Engine
+}
+
+func (h *errTap) Handle(ctx context.Context, r slog.Record) error {
+	if r.Level >= slog.LevelError {
+		msg := r.Message
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "err" || a.Key == "path" {
+				msg += " " + a.Key + "=" + a.Value.String()
+			}
+			return true
+		})
+		h.e.healthMu.Lock()
+		h.e.lastErr, h.e.lastErrAt = msg, r.Time
+		h.e.errCount++
+		h.e.healthMu.Unlock()
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h *errTap) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &errTap{Handler: h.Handler.WithAttrs(attrs), e: h.e}
+}
+
+func (h *errTap) WithGroup(name string) slog.Handler {
+	return &errTap{Handler: h.Handler.WithGroup(name), e: h.e}
 }
 
 // New opens the index and prepares the engine.
@@ -89,9 +150,13 @@ func New(cfg *config.Config, st Storage, log *slog.Logger) (*Engine, error) {
 		idx.Close()
 		return nil, err
 	}
-	e := &Engine{cfg: cfg, log: log, st: st, idx: idx, ex: ex}
+	e := &Engine{cfg: cfg, st: st, idx: idx, ex: ex, startedAt: time.Now()}
+	e.log = slog.New(&errTap{Handler: log.Handler(), e: e})
 	etag, _ := idx.GetMeta(metaCursorETag)
 	e.cursorETag.Store(etag)
+	if ts := e.lastJournalTs(); ts > 0 {
+		e.lastChange.Store(time.UnixMilli(ts).UnixNano()) // survives restarts for status / idle poll
+	}
 	e.relay.role.Store("none")
 	if err := e.normalizeIndex(); err != nil {
 		idx.Close()

@@ -31,6 +31,7 @@ func (e *Engine) CheckCursor(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	e.lastPollOK.Store(time.Now().UnixNano())
 	if etag == e.cursorETag.Load().(string) {
 		return nil, nil
 	}
@@ -116,7 +117,7 @@ func (e *Engine) applyEntry(ctx context.Context, key string, entry *journal.Entr
 	defer e.mu.Unlock()
 	stamp := time.Now().Format("20060102-150405")
 	var pending []string
-	applied := 0
+	var applied []string
 	for _, op := range entry.Ops {
 		op.Path = nfc(op.Path)
 		if e.ex.Match(op.Path) {
@@ -136,7 +137,7 @@ func (e *Engine) applyEntry(ctx context.Context, key string, entry *journal.Entr
 		case "put":
 			p, err = e.applyPut(ctx, op.Path, key, op.Hash, op.Prev, op.ETag, op.Mtime)
 		case "delete":
-			p, err = e.applyDelete(ctx, op.Path, stamp)
+			p, err = e.applyDelete(ctx, op.Path, stamp, entry.Node)
 		default:
 			continue
 		}
@@ -145,10 +146,14 @@ func (e *Engine) applyEntry(ctx context.Context, key string, entry *journal.Entr
 			continue
 		}
 		pending = append(pending, p...)
-		applied++
+		applied = append(applied, op.Path)
 	}
 	e.touch()
-	e.log.Info("batch applied", "key", key, "from", entry.Node, "ops", len(entry.Ops), "changed", applied)
+	args := []any{"key", key, "from", entry.Node, "ops", len(entry.Ops), "applied", len(applied)}
+	if len(applied) <= logPathsMax {
+		args = append(args, "paths", applied)
+	}
+	e.log.Info("batch applied", args...)
 	return pending, nil
 }
 
@@ -243,6 +248,7 @@ func (e *Engine) pull(ctx context.Context, rel, key string, idx *index.Entry, lo
 			return nil, fmt.Errorf("conflict copy: %w", err)
 		}
 		e.log.Warn("conflict", "path", rel, "kept_as", cname)
+		e.noteChange("conflict", cname, e.cfg.Node)
 		pending = append(pending, cname)
 	}
 	mtime := fallbackMtime
@@ -269,12 +275,13 @@ func (e *Engine) pull(ctx context.Context, rel, key string, idx *index.Entry, lo
 		return nil, err
 	}
 	e.log.Debug("downloaded", "path", rel, "size", fi.Size())
+	e.noteChange("put", rel, nodeOfKey(key))
 	return pending, e.idx.Put(rel, index.Entry{Size: fi.Size(), Mtime: fi.ModTime().UnixNano(), Hash: hash, ETag: etag, Journal: key})
 }
 
 // applyDelete moves the local file to trash unless it was modified locally
 // since the last sync, in which case it is kept and re-uploaded.
-func (e *Engine) applyDelete(ctx context.Context, rel, stamp string) ([]string, error) {
+func (e *Engine) applyDelete(ctx context.Context, rel, stamp, from string) ([]string, error) {
 	cur, has, err := e.idx.Get(rel)
 	if err != nil {
 		return nil, err
@@ -299,8 +306,24 @@ func (e *Engine) applyDelete(ctx context.Context, rel, stamp string) ([]string, 
 			return nil, err
 		}
 		e.log.Debug("trashed", "path", rel)
+		e.noteChange("delete", rel, from)
 		return nil, e.idx.Delete(rel)
 	}
 	e.log.Warn("remote delete ignored, local file modified", "path", rel)
 	return []string{rel}, e.idx.Delete(rel)
+}
+
+// logPathsMax is the batch size up to which paths are logged at info level.
+const logPathsMax = 10
+
+// nodeOfKey names the node that wrote a journal key; "" (reconcile) → "reconcile".
+func nodeOfKey(key string) string {
+	if key == "" {
+		return "reconcile"
+	}
+	_, node, _, err := journal.ParseKey(key)
+	if err != nil {
+		return "?"
+	}
+	return node
 }
