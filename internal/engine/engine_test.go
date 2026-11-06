@@ -682,3 +682,103 @@ func TestStatusTracksChangesAndErrors(t *testing.T) {
 		t.Fatalf("recent len %d", n)
 	}
 }
+
+// A put that could not be fetched leaves the reader one version behind; the
+// next entry of the same series must replace the file, not fork it.
+func TestLostPutIsNotAConflict(t *testing.T) {
+	fs := newFake()
+	a := newNode(t, fs, "a")
+	b := newNode(t, fs, "b")
+	a.write(t, "n.md", "v0")
+	a.upload(t, "n.md")
+	b.poll(t)
+
+	fail := true
+	b.e.st = &hookStore{fakeStore: fs, onData: func() error {
+		if fail {
+			fail = false
+			return errors.New("409 OperationAborted")
+		}
+		return nil
+	}}
+	a.write(t, "n.md", "v0 v1")
+	a.upload(t, "n.md")
+	b.poll(t) // the data GET fails, the op is dropped
+	a.write(t, "n.md", "v0 v1 v2")
+	a.upload(t, "n.md")
+	b.poll(t)
+	if c := b.conflictCopies(t); len(c) > 0 {
+		t.Fatalf("conflict copies on a node that never edited the file: %v", c)
+	}
+	if got := b.read(t, "n.md"); got != "v0 v1 v2" {
+		t.Fatalf("n.md = %q", got)
+	}
+}
+
+// A reader catching up on a series while the writer keeps going downloads
+// content newer than the entry it is applying; that is lag, not a conflict.
+func TestReaderBehindSeriesIsNotAConflict(t *testing.T) {
+	fs := newFake()
+	a := newNode(t, fs, "a")
+	b := newNode(t, fs, "b")
+	a.write(t, "n.md", "v0")
+	a.upload(t, "n.md")
+	b.poll(t)
+	for _, v := range []string{"v0 v1", "v0 v1 v2", "v0 v1 v2 v3"} {
+		a.write(t, "n.md", v)
+		a.upload(t, "n.md")
+	}
+	gets := 0
+	b.e.st = &hookStore{fakeStore: fs, onData: func() error {
+		gets++
+		if gets == 2 { // the writer lands one more version mid catch-up
+			a.write(t, "n.md", "v0 v1 v2 v3 v4")
+			a.upload(t, "n.md")
+		}
+		return nil
+	}}
+	b.poll(t)
+	b.poll(t)
+	if c := b.conflictCopies(t); len(c) > 0 {
+		t.Fatalf("conflict copies on a node that never edited the file: %v", c)
+	}
+	if got := b.read(t, "n.md"); got != "v0 v1 v2 v3 v4" {
+		t.Fatalf("n.md = %q", got)
+	}
+}
+
+// Divergent edits on a and b: only the author of the displaced version keeps
+// it as a conflict copy; a third node just follows.
+func TestDivergentEditsOneCopyAcrossThreeNodes(t *testing.T) {
+	fs := newFake()
+	a := newNode(t, fs, "a")
+	b := newNode(t, fs, "b")
+	c := newNode(t, fs, "c")
+	a.write(t, "n.md", "base")
+	a.upload(t, "n.md")
+	b.poll(t)
+	c.poll(t)
+
+	a.write(t, "n.md", "edit a")
+	b.write(t, "n.md", "edit b")
+	a.upload(t, "n.md")
+	c.poll(t) // c holds a's version when b's arrives
+	time.Sleep(2 * time.Millisecond)
+	b.upload(t, "n.md")
+	for i := 0; i < 3; i++ {
+		a.poll(t)
+		b.poll(t)
+		c.poll(t)
+	}
+	ta := a.tree(t)
+	if !reflect.DeepEqual(ta, b.tree(t)) || !reflect.DeepEqual(ta, c.tree(t)) {
+		t.Fatalf("trees differ:\n a=%v\n b=%v\n c=%v", ta, b.tree(t), c.tree(t))
+	}
+	copies := c.conflictCopies(t)
+	if len(copies) != 1 || !strings.Contains(copies[0], "(conflict a ") || ta[copies[0]] != "edit a" {
+		t.Fatalf("want exactly a's conflict copy: %v", ta)
+	}
+	if ta["n.md"] != "edit b" {
+		t.Fatalf("n.md = %q, want the newer upload", ta["n.md"])
+	}
+}

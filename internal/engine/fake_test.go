@@ -220,3 +220,31 @@ func (n *node) trashed(t *testing.T) []string {
 	})
 	return out
 }
+
+// hookStore runs onData before every GET of a data object, so a test can fail
+// the request or change the bucket at that exact moment.
+type hookStore struct {
+	*fakeStore
+	onData func() error
+}
+
+func (h *hookStore) GetTo(ctx context.Context, key string, w io.Writer) (string, map[string]string, error) {
+	if strings.HasPrefix(key, "data/") {
+		if err := h.onData(); err != nil {
+			return "", nil, err
+		}
+	}
+	return h.fakeStore.GetTo(ctx, key, w)
+}
+
+func (n *node) conflictCopies(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	for p := range n.tree(t) {
+		if strings.Contains(p, "(conflict ") {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
+}

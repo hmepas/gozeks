@@ -13,6 +13,8 @@ func TestNotifyAndSubscribe(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := NewServer("srv", "127.0.0.1:0", "tok", cert, slog.Default())
+	notified := make(chan []string, 10)
+	s.OnNotify = func(keys []string) { notified <- keys }
 	if err := s.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -54,8 +56,22 @@ func TestNotifyAndSubscribe(t *testing.T) {
 			t.Fatal("timeout")
 		}
 	}
+	// the relay node itself is told too
+	select {
+	case ks := <-notified:
+		if len(ks) != 2 || ks[0] != "_sync/journal/a" {
+			t.Fatalf("OnNotify got %v", ks)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnNotify not called")
+	}
 	if err := Notify(ctx, url, fp, "wrong", []string{"x"}); err == nil {
 		t.Fatal("bad token accepted")
+	}
+	select {
+	case ks := <-notified:
+		t.Fatalf("OnNotify called for an unauthorized notify: %v", ks)
+	default:
 	}
 	if err := Notify(ctx, url, "00deadbeef", "tok", []string{"x"}); err == nil {
 		t.Fatal("bad fingerprint accepted")

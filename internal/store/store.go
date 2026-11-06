@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -80,6 +81,9 @@ func New(cfg config.S3) (*Store, error) {
 		RequestChecksumCalculation: aws.RequestChecksumCalculationWhenRequired,
 		ResponseChecksumValidation: aws.ResponseChecksumValidationWhenRequired,
 		RetryMaxAttempts:           4,
+		// Selectel answers 409 OperationAborted ("Try again.") when a request
+		// collides with a concurrent write of the same key; not retryable by default.
+		Retryer: retry.AddWithErrorCodes(retry.NewStandard(), "OperationAborted"),
 	})
 	return &Store{c: c, bucket: cfg.Bucket}, nil
 }

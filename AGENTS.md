@@ -63,7 +63,9 @@ Expected latency to the bucket: debounce + one PUT ≈ 2–4 s.
 Two sources of "something changed", same apply logic for both:
 
 - **Relay push (primary).** A node connected to the relay receives the exact journal
-  key(s) and GETs them directly, no LIST. See "Relay" below.
+  key(s) and GETs them directly, no LIST. See "Relay" below. The relay node itself applies
+  the keys it receives on `POST /notify` the same way (2026-11-06; before that it waited for
+  its own marker poll, so follower → relay took up to `poll`).
 - **Marker polling (fallback and the relay's own source).** HEAD `_sync/cursor` every
   `poll` (default 5 s on the relay, `fallback_poll` 60 s on nodes that are connected to a
   relay, `poll` 5 s on nodes that cannot reach one).
@@ -165,6 +167,20 @@ applies the newer one and keeps its own as the conflict copy; the node holding t
 version ignores the older entry. Both compare the same two timestamps, so clock skew cannot
 make them disagree, and exactly one conflict copy is produced. A sequential edit (entry `prev`
 == our index hash) is always applied regardless of timestamps.
+
+Only the author keeps the copy (2026-11-06). In the divergent case the displaced version
+becomes a conflict copy only on the node that uploaded it (its index entry points at a
+journal key written by this node). A node that merely downloaded that version replaces it
+silently. Reasons: (1) a `prev` mismatch on a non-author is almost always lag, not divergence:
+an op was dropped (failed GET), or a GET returned a newer object than the entry describes
+while a series of edits was still running; both produced false conflict copies of DAR on
+eowyn (2026-11-01, 2026-11-05), each time one entry after a 409 from Selectel; (2) with three
+nodes the bystander used to make its own copy of the same content under a second name.
+A locally edited, not yet uploaded file is still always kept (first bullet above).
+Accepted cost: if the author crashes right after its upload and the version is overwritten
+before it comes back, no node holds a conflict copy; the version is only in bucket versioning.
+Known residual: an author that drops a sequential op (retries exhausted) still makes one
+false copy on the next entry of that series.
 
 ### Reconcile (drift repair)
 
@@ -383,6 +399,15 @@ Monitoring (2026-10-30):
   for external widgets/monitors. Keep it in step with `engine.Status` and `healthProblems`.
 - `<config dir>/env` is read by `config.Load` (process environment wins). Commands that do
   not touch the bucket (`status`, `trash`, `index`) no longer require credentials at all.
+
+Transient S3 errors (2026-11-06):
+- Selectel answers `409 OperationAborted` ("A conflicting conditional operation is currently
+  in progress against this resource. Try again.") when a request collides with a concurrent
+  write of the same key. The SDK does not retry that code by default; `store.New` adds it to
+  the retryable set (4 attempts, SDK backoff), for every request class.
+- An op that still fails is logged and dropped, and the journal key is marked processed; the
+  file catches up with the next entry for that path or with reconcile. It never turns into a
+  conflict copy on a node that did not author the version it holds (see Conflicts).
 
 Review fixes (2026-10-29, after the first build):
 - `CheckCursor` is single-flighted (`pollMu`) and the cursor ETag is an atomic value: the poll

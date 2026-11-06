@@ -420,6 +420,12 @@ func TestRelayFastPathAndFailover(t *testing.T) {
 	if d > 2*time.Second {
 		t.Fatalf("relay path took %s, want < 2s", d)
 	}
+	// the relay node applies what followers announce without waiting for its poll
+	a.write("to-relay.md", "hello")
+	d = eventually(t, 5*time.Second, "delivery to the relay node", func() bool { v, _ := r.read("to-relay.md"); return v == "hello" })
+	if d > 2*time.Second {
+		t.Fatalf("delivery to the relay node took %s, want < 2s", d)
+	}
 
 	// kill the relay: B falls back to polling and still receives changes
 	r.stop()

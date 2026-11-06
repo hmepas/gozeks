@@ -59,6 +59,11 @@ type Server struct {
 
 	mu   sync.Mutex
 	subs map[chan string]Peer
+
+	// OnNotify, if set before Start, receives the keys of every accepted
+	// /notify so the relay node can apply them itself (it has no SSE stream
+	// of its own). It must not block.
+	OnNotify func(keys []string)
 }
 
 // NewServer prepares a server; call Start to listen. node is the relay's own
@@ -181,6 +186,9 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Broadcast(body.Keys)
+	if s.OnNotify != nil {
+		s.OnNotify(body.Keys)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

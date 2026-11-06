@@ -164,9 +164,15 @@ func (e *Engine) applyEntry(ctx context.Context, key string, entry *journal.Entr
 // Concurrent edits are resolved deterministically: an incoming version whose
 // base (prev) is not what we hold is divergent. If our version is newer by
 // journal timestamp we ignore the entry (the other node will take ours and
-// keep its own as a conflict copy); otherwise theirs takes the path and ours
-// becomes the conflict copy. Both nodes compare the same two timestamps, so
-// clock skew cannot make them disagree.
+// keep its own as a conflict copy); otherwise theirs takes the path. Both
+// nodes compare the same two timestamps, so clock skew cannot make them
+// disagree.
+//
+// The displaced version becomes a conflict copy only on the node that
+// uploaded it. A version we merely downloaded is replaced silently: its author
+// keeps the copy, and a base mismatch here usually means we are behind a
+// series of edits (a dropped op, or a GET that returned a newer object than
+// the entry describes), not that anyone diverged.
 func (e *Engine) applyPut(ctx context.Context, rel, key, remoteHash, prevHash, remoteETag string, remoteMtime int64) ([]string, error) {
 	cur, has, err := e.idx.Get(rel)
 	if err != nil {
@@ -197,7 +203,13 @@ func (e *Engine) applyPut(ctx context.Context, rel, key, remoteHash, prevHash, r
 		}
 		return nil, e.idx.Put(rel, index.Entry{Size: loc.size, Mtime: loc.mtime, Hash: loc.hash, ETag: etag, Journal: key})
 	}
-	return e.pull(ctx, rel, key, idx, loc, divergent, remoteMtime)
+	return e.pull(ctx, rel, key, idx, loc, divergent && e.uploadedHere(cur.Journal), remoteMtime)
+}
+
+// uploadedHere reports whether a journal key was written by this node.
+func (e *Engine) uploadedHere(key string) bool {
+	_, node, _, err := journal.ParseKey(key)
+	return err == nil && node == e.cfg.Node
 }
 
 // newerThan reports whether journal key a has a later timestamp than key b.
@@ -208,10 +220,10 @@ func newerThan(a, b string) bool {
 }
 
 // pull downloads data/<rel> to a temp file, then decides: identical to the
-// local file → just record; local file modified since last sync, or the
-// incoming version is divergent → keep ours as a conflict copy; then the
-// download takes the path.
-func (e *Engine) pull(ctx context.Context, rel, key string, idx *index.Entry, loc *localFile, divergent bool, fallbackMtime int64) ([]string, error) {
+// local file → just record; local file modified since last sync, or keepOurs
+// (the incoming version displaces one we uploaded) → keep ours as a conflict
+// copy; then the download takes the path.
+func (e *Engine) pull(ctx context.Context, rel, key string, idx *index.Entry, loc *localFile, keepOurs bool, fallbackMtime int64) ([]string, error) {
 	if e.DryRun {
 		e.log.Info("would download", "path", rel)
 		return nil, nil
@@ -242,7 +254,7 @@ func (e *Engine) pull(ctx context.Context, rel, key string, idx *index.Entry, lo
 		return nil, e.idx.Put(rel, index.Entry{Size: loc.size, Mtime: loc.mtime, Hash: hash, ETag: etag, Journal: key})
 	}
 	var pending []string
-	if loc != nil && (idx == nil || loc.hash != idx.Hash || divergent) {
+	if loc != nil && (idx == nil || loc.hash != idx.Hash || keepOurs) {
 		cname := conflictName(rel, e.cfg.Node, time.Now())
 		if err := os.Rename(abs, e.abs(cname)); err != nil {
 			return nil, fmt.Errorf("conflict copy: %w", err)

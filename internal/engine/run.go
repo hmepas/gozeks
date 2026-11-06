@@ -352,6 +352,32 @@ func nodeOf(l *relay.Lock) string {
 // lead runs the relay server and renews the lease until we lose it.
 func (e *Engine) lead(ctx context.Context, cert tls.Certificate, t Timings) {
 	srv := relay.NewServer(e.cfg.Node, e.cfg.Relay.Listen, e.cfg.Relay.Token, cert, e.log)
+	// The relay has no SSE stream of its own: apply what followers announce
+	// right away (in order, one at a time) instead of waiting for the next
+	// marker poll.
+	keys := make(chan string, 1024)
+	applyCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		for {
+			select {
+			case <-applyCtx.Done():
+				return
+			case k := <-keys:
+				if _, err := e.ApplyKeys(applyCtx, []string{k}); err != nil && applyCtx.Err() == nil {
+					e.log.Warn("apply notified key", "key", k, "err", err)
+				}
+			}
+		}
+	}()
+	srv.OnNotify = func(ks []string) {
+		for _, k := range ks {
+			select {
+			case keys <- k:
+			default: // queue full; the marker poll covers it
+			}
+		}
+	}
 	if err := srv.Start(); err != nil {
 		e.log.Error("relay listen", "err", err)
 		sleepCtx(ctx, t.Backoff)
