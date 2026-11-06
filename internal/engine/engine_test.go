@@ -639,7 +639,16 @@ func TestNFDOnDiskNameIsNotACaseConflict(t *testing.T) {
 	if !fs.has("data/" + nfc(nfd)) {
 		t.Fatalf("not uploaded: %v", fs.keys("data/"))
 	}
-	a.write(t, nfd, "v2")
+	edit := nfd // APFS: the NFD spelling still opens the same file
+	if runtime.GOOS != "darwin" {
+		// Linux: the upload renamed the file to NFC; writing the NFD spelling
+		// now would create a distinct twin (covered by TestNFCNormalization)
+		if _, err := os.Lstat(filepath.Join(a.root, nfd)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("NFD name not renamed on disk: %v", err)
+		}
+		edit = nfc(nfd)
+	}
+	a.write(t, edit, "v2")
 	a.upload(t, nfc(nfd)) // reconcile-style NFC path
 	body, _, _, _ := fs.Get(context.Background(), "data/"+nfc(nfd))
 	if string(body) != "v2" {
