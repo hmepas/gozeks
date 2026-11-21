@@ -21,7 +21,7 @@ shutdown. Two ways to read it:
 For the health verdict without parsing anything: `gozeks status --check` prints `ok` and exits
 0, or prints one problem per line and exits 1.
 
-Other nodes: run the same command there (`ssh eowyn gozeks status --json`). The relay also
+Other nodes: run the same command there (`ssh server gozeks status --json`). The relay also
 tells every node who is connected (`peers`), so a widget on one machine already knows which
 nodes are online without contacting them.
 
@@ -87,9 +87,9 @@ Useful secondary lines:
   "node": "mac",
   "relay_role": "follower",
   "relay_connected": true,
-  "relay_url": "https://eowyn.example:8712",
+  "relay_url": "https://server.example:8712",
   "peers": [
-    {"node": "eowyn", "since": "2026-10-30T07:59:05Z", "relay": true},
+    {"node": "server", "since": "2026-10-30T07:59:05Z", "relay": true},
     {"node": "mac",   "since": "2026-10-30T07:59:06Z"},
     {"node": "arch",  "since": "2026-10-30T08:12:40Z"}
   ],
@@ -102,7 +102,7 @@ Useful secondary lines:
   "errors": 0,
   "recent": [
     {"op": "put", "path": "Notes/DAR.md", "node": "mac", "at": "2026-10-30T20:51:10+03:00"},
-    {"op": "put", "path": ".herald/wal/2026-10-30.jsonl", "node": "eowyn", "at": "2026-10-30T20:54:31+03:00"}
+    {"op": "put", "path": ".herald/wal/2026-10-30.jsonl", "node": "server", "at": "2026-10-30T20:54:31+03:00"}
   ],
   "counters": {"put": 104, "get": 1421, "delete": 13573, "bytes_up": 51856880, "bytes_down": 66148048},
   "counters_since": "2026-10-29T22:33:13+03:00",

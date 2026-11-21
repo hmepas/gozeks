@@ -7,8 +7,8 @@ root = "~/zk"                       # the folder to sync
 state_dir = "~/.local/state/gozeks/zk"
 
 [s3]
-endpoint = "https://s3.ru-3.storage.selcloud.ru"
-region = "ru-3"
+endpoint = "https://s3.example.com"
+region = "region-1"
 bucket = "obs"
 path_style = false                  # true for MinIO and most self-hosted endpoints
 

@@ -34,13 +34,15 @@ something actually changes.
 
 ## Requirements
 
-- An S3-compatible bucket (tested with Selectel; MinIO used in tests) and an access key pair
+- An S3-compatible bucket (tested with a commercial S3 provider; MinIO used in tests) and an access key pair
   with read/write rights on that bucket.
 - macOS or Linux. Go 1.26 to build.
 
 ## Quick start
 
 ```sh
+brew install hmepas/formulae/gozeks   # macOS; run it with `brew services start gozeks`
+# or build from source:
 make build            # macOS: needs cgo for FSEvents (Xcode command line tools)
 make build-linux      # static linux/amd64 binary in dist/
 
@@ -101,7 +103,7 @@ already set in the environment take precedence. The service units point at the s
 
 ## Cost
 
-On Selectel's 2026 prices a Mac plus two servers comes to roughly ₽55/month: the relay's
+At 2026 prices of the provider in use a Mac plus two servers comes to roughly ₽55/month: the relay's
 polling, lease renewals, a few hundred uploads a day and a 1 GB vault with versions.
 `gozeks status` shows live request counters so you can check.
 
@@ -124,3 +126,17 @@ Design decisions, the bucket layout and the acceptance tests live in `AGENTS.md`
     make test          # unit tests
     ./test/minio.sh    # or docker-compose -f test/docker-compose.yml up -d
     make integration   # multi-daemon scenarios against MinIO (see test/README.md)
+
+## Releasing
+
+The Homebrew formula lives in the `hmepas/homebrew-formulae` tap and builds from the tag's
+source tarball.
+
+    git tag vX.Y.Z && git push origin vX.Y.Z
+    cd "$(brew --repository hmepas/formulae)"
+    scripts/update-formula.sh gozeks X.Y.Z      # bumps url + sha256
+    git commit -am "gozeks X.Y.Z" && git push
+    brew update && brew upgrade gozeks          # brew services restarts the daemon
+
+If `brew upgrade` reports a checksum mismatch, GitHub regenerated the tarball after the sha was
+taken (seen once right after the repo went public): rerun `update-formula.sh` and push again.

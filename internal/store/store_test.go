@@ -10,7 +10,7 @@ import (
 	"github.com/hmepas/gozeks/internal/config"
 )
 
-// Selectel answers 409 OperationAborted ("Try again.") to a GET that collides
+// Some providers answer 409 OperationAborted ("Try again.") to a GET that collides
 // with a PUT of the same key; the client must retry it instead of failing.
 func TestGetRetriesOperationAborted(t *testing.T) {
 	var calls atomic.Int32

@@ -115,11 +115,11 @@ Roles are in the same binary and the same process; `relay` is an extra goroutine
   already requires the S3 credentials.
 
 **Leader election via S3 lock file** `_sync/relay.lock`:
-`{"node":"eowyn","url":"https://1.2.3.4:8711","cert_sha256":"...","lease_until":<unix>}`.
+`{"node":"server","url":"https://1.2.3.4:8711","cert_sha256":"...","lease_until":<unix>}`.
 
 Only nodes with `[relay] listen` configured are candidates (servers with a reachable
 address; the Mac is never a candidate). S3 has no portable compare-and-swap (AWS has
-conditional PUTs, Selectel is not guaranteed to), so the election is a lease with
+conditional PUTs, other providers are not guaranteed to), so the election is a lease with
 write-then-verify:
 1. Candidate GETs the lock. If absent, or `lease_until` is in the past by more than 10 s →
    wait a random 0–3 s, PUT the lock with itself and `lease_until = now + 10 min`, wait 3 s,
@@ -174,7 +174,7 @@ journal key written by this node). A node that merely downloaded that version re
 silently. Reasons: (1) a `prev` mismatch on a non-author is almost always lag, not divergence:
 an op was dropped (failed GET), or a GET returned a newer object than the entry describes
 while a series of edits was still running; both produced false conflict copies of DAR on
-eowyn (2026-11-01, 2026-11-05), each time one entry after a 409 from Selectel; (2) with three
+server (2026-11-01, 2026-11-05), each time one entry after a 409 from the provider; (2) with three
 nodes the bystander used to make its own copy of the same content under a second name.
 A locally edited, not yet uploaded file is still always kept (first bullet above).
 Accepted cost: if the author crashes right after its upload and the version is overwritten
@@ -220,7 +220,7 @@ platform mismatch is not a conflict source.
 
 ### Journal pruning
 
-Delete journal entries older than 7 days during reconcile (DELETE is free at Selectel).
+Delete journal entries older than 7 days during reconcile (DELETE is free at the current provider).
 A node that was offline longer than that relies on reconcile, which is why reconcile runs at startup.
 
 ## Config
@@ -229,12 +229,12 @@ Single TOML (or YAML; agent decides, TOML preferred) file, default `~/.config/go
 
 ```toml
 node = "mac"                       # unique per node, used in journal keys and conflict names
-root = "/Users/hmepas/zk"          # local folder
+root = "~/zk"                      # local folder
 state_dir = "~/.local/state/gozeks/zk"
 
 [s3]
-endpoint = "https://s3.ru-3.storage.selcloud.ru"
-region = "ru-3"
+endpoint = "https://s3.example.com"
+region = "region-1"
 bucket = "obs"
 path_style = false                 # bucket created as vHosted
 # keys come from env: GOZEKS_S3_ACCESS_KEY / GOZEKS_S3_SECRET_KEY (or AWS_* as fallback)
@@ -288,7 +288,7 @@ Both shipped under `deploy/` with install instructions in README.
 
 ## Dependencies (keep minimal)
 
-- `github.com/aws/aws-sdk-go-v2` (s3, config). Tested against Selectel; must work with any
+- `github.com/aws/aws-sdk-go-v2` (s3, config). Tested against a commercial S3 provider; must work with any
   S3-compatible endpoint (MinIO in tests).
 - FS watcher: `github.com/rjeczalik/notify` or `github.com/fsnotify/fsnotify` (see above).
 - `go.etcd.io/bbolt` for state (if chosen).
@@ -316,11 +316,11 @@ Go 1.26 is installed on the Mac. Target `darwin/arm64` and `linux/amd64`; CGO of
      the lease once it expires (use a short lease in the test); the old leader restarted sees the
      lock names someone else and stays a follower;
    - two candidates start simultaneously → exactly one holds the lease after 10 s.
-3. Manual DoD on real infra: Mac + one server on the Selectel bucket, DAR file edited in
+3. Manual DoD on real infra: Mac + one server on the production bucket, DAR file edited in
    Obsidian, agent on the server sees the change ≤ 10 s; agent appends a line, Obsidian shows it
    ≤ 10 s. Request counters after 24 h match the cost estimate in README within 2x.
 
-## Cost model (Selectel ru-3, Standard, prices seen 2026-10-29)
+## Cost model (current provider, standard storage class, prices seen 2026-10-29)
 
 Storage ₽2.5654/GB·month, PUT/POST/COPY ₽0.714/1000, GET/HEAD/LIST ₽0.0543/1000, DELETE free,
 egress to internet ₽1.377/GB, ingress free.
@@ -401,7 +401,7 @@ Monitoring (2026-10-30):
   not touch the bucket (`status`, `trash`, `index`) no longer require credentials at all.
 
 Transient S3 errors (2026-11-06):
-- Selectel answers `409 OperationAborted` ("A conflicting conditional operation is currently
+- The current provider answers `409 OperationAborted` ("A conflicting conditional operation is currently
   in progress against this resource. Try again.") when a request collides with a concurrent
   write of the same key. The SDK does not retry that code by default; `store.New` adds it to
   the retryable set (4 attempts, SDK backoff), for every request class.
